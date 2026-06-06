@@ -522,6 +522,12 @@ def _fmt_time(ts):
 
 
 async def serve(request):
+    # widok/stan kolejki lektora (dostępny z dowolnej ścieżki)
+    if 'lektorq' in request.query:
+        return web.Response(text=LEKTORQ_PAGE, content_type='text/html')
+    if 'lektorqj' in request.query:
+        return web.json_response(_lektor_queue_json())
+
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -615,7 +621,8 @@ async def serve(request):
             f'<title>{rel_url}</title>',
             f'<style>{STYLE}</style>',
             f'<h2>{breadcrumb}</h2>',
-            f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · ⟳ auto-odświeżanie</p>',
+            f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
+            f'⟳ auto-odświeżanie · <a href="/?lektorq=1">🔊 kolejka lektora</a></p>',
             '<table><thead><tr>'
             '<th>Nazwa</th><th>Rozmiar</th><th>Modyfikacja</th><th>Utworzono</th>'
             '</tr></thead><tbody>',
@@ -658,9 +665,9 @@ async def delete_item(request):
 
 CZYTAJ_TTS = '/mnt/data/sprawozdania/EXPORT/czytaj_tts.py'
 LEKTOR_CONF = '/mnt/data/sprawozdania/EXPORT/lektor-ustawienia.conf'
-_LEKTOR_JOBS = set()       # ścieżki wyjściowe w trakcie/kolejce (dedup)
 _LEKTOR_LOCK = None        # asyncio.Lock tworzony leniwie (jeden lektor naraz)
-_LEKTOR_PENDING = []       # nazwy oczekujące/generowane (podgląd kolejki)
+_LEKTOR_SEQ = 0
+_LEKTOR_QUEUE: list = []   # rejestr zadań: id/out/src/fmt/state/cancelled/proc
 
 
 def _ext_lektor_running() -> bool:
@@ -674,8 +681,70 @@ def _ext_lektor_running() -> bool:
 
 def _lektor_busy() -> bool:
     global _LEKTOR_LOCK
-    return bool(_LEKTOR_PENDING) or _ext_lektor_running() \
+    return bool(_LEKTOR_QUEUE) or _ext_lektor_running() \
         or (_LEKTOR_LOCK is not None and _LEKTOR_LOCK.locked())
+
+
+def _lektor_queue_json() -> dict:
+    jobs = [{'id': j['id'], 'out': Path(j['out']).name,
+             'src': str(Path(j['src']).relative_to(ROOT))
+             if str(j['src']).startswith(str(ROOT)) else Path(j['src']).name,
+             'fmt': j['fmt'], 'state': j['state']}
+            for j in _LEKTOR_QUEUE if not j['cancelled']]
+    return {'jobs': jobs, 'external': _ext_lektor_running()}
+
+
+LEKTORQ_PAGE = (
+    '<!doctype html><meta charset=utf-8>'
+    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    '<title>Kolejka lektora</title><style>'
+    'body{margin:0;background:#14161c;color:#cfd6df;'
+    'font-family:system-ui,sans-serif}'
+    '.bar{display:flex;gap:.6em;align-items:center;padding:.55em 1em;'
+    'background:#1d2027}'
+    '.bar a{color:#7ab7ff;border:1px solid #343a45;border-radius:5px;'
+    'padding:.25em .7em;text-decoration:none}'
+    'h2{margin:.4em 0 0 0;font-size:1.1em;color:#eee}'
+    'table{width:min(820px,94vw);margin:1em auto;border-collapse:collapse;'
+    'background:#1b1e25;border-radius:8px;overflow:hidden}'
+    'th,td{padding:.55em .8em;text-align:left;border-bottom:1px solid #262b35;'
+    'font-size:.93em}'
+    'th{background:#22262f;color:#9aa4b1}'
+    '.run{color:#7ce38b}.que{color:#e0c060}.ext{color:#8a93a0;font-style:italic}'
+    '.x{color:#ff7b72;cursor:pointer;text-decoration:none;font-weight:700}'
+    '.empty{text-align:center;color:#8a93a0;padding:2em}'
+    '</style>'
+    '<div class="bar"><a href="/">📁 pliki</a>'
+    '<h2>🔊 Kolejka lektora</h2>'
+    '<span id="st" style="color:#8a93a0;font-size:.85em"></span></div>'
+    '<table><thead><tr><th>#</th><th>plik wynikowy</th><th>źródło</th>'
+    '<th>format</th><th>stan</th><th></th></tr></thead>'
+    '<tbody id="tb"></tbody></table>'
+    '<script>'
+    'async function load(){'
+    'try{const j=await(await fetch("/?lektorqj=1",{cache:"no-store"})).json();'
+    'const tb=document.getElementById("tb");let h="";let i=0;'
+    'if(j.external){h+="<tr><td>—</td><td colspan=3 class=ext>'
+    'lektor uruchomiony poza serwerem (agent Discord / CLI)</td>'
+    '<td class=run>GENERUJE</td><td></td></tr>";}'
+    'for(const x of j.jobs){i++;'
+    'h+="<tr><td>"+i+"</td><td>"+x.out+"</td><td style=\'color:#8a93a0\'>"'
+    '+x.src+"</td><td>"+x.fmt+"</td><td class="'
+    '+(x.state==="running"?"run":"que")+">"'
+    '+(x.state==="running"?"GENERUJE":"czeka")+"</td>'
+    '<td><a class=x data-i="+x.id+" href=#>✕</a></td></tr>";}'
+    'if(!h)h="<tr><td colspan=6 class=empty>Kolejka pusta — lektor wolny</td></tr>";'
+    'tb.innerHTML=h;'
+    'document.getElementById("st").textContent='
+    '"odświeżono "+new Date().toLocaleTimeString();'
+    '}catch(e){}}'
+    'document.addEventListener("click",async e=>{'
+    'const a=e.target.closest("a.x");if(!a)return;e.preventDefault();'
+    'if(!confirm("Usunąć tę pozycję z kolejki lektora?"+'
+    '"\\n(trwająca generacja zostanie przerwana)"))return;'
+    'await fetch("/?lektorqdel="+a.dataset.i,{method:"POST"});load();});'
+    'load();setInterval(load,3000);'
+    '</script>')
 
 
 def _lektor_fmt() -> str:
@@ -746,45 +815,59 @@ async def lektor_item(request):
     if out_dir.name == 'processed' and (out_dir.parent / 'exports').is_dir():
         out_dir = out_dir.parent / 'exports'
     out = out_dir / f'{target.stem}_lektor.{fmt}'
-    if str(out) in _LEKTOR_JOBS:
+    if any(j['out'] == str(out) and not j['cancelled'] for j in _LEKTOR_QUEUE):
         return web.json_response({'status': 'duplikat', 'out': out.name})
 
     # lektor zajęty (przeglądarka ALBO agent z Discorda) → bez flagi queue
     # zwracamy 'busy'; UI pyta usera o dopisanie do kolejki
     if _lektor_busy() and 'queue' not in request.query:
         return web.json_response(
-            {'status': 'busy', 'pending': len(_LEKTOR_PENDING)})
+            {'status': 'busy', 'pending': len(_LEKTOR_QUEUE)})
 
-    global _LEKTOR_LOCK
+    global _LEKTOR_LOCK, _LEKTOR_SEQ
     if _LEKTOR_LOCK is None:
         _LEKTOR_LOCK = asyncio.Lock()
-    _LEKTOR_JOBS.add(str(out))
-    _LEKTOR_PENDING.append(out.name)
-    queued = _lektor_busy() and len(_LEKTOR_PENDING) > 1
+    _LEKTOR_SEQ += 1
+    job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
+           'state': 'queued', 'cancelled': False, 'proc': None}
+    queued = bool(_LEKTOR_QUEUE) or _ext_lektor_running()
+    _LEKTOR_QUEUE.append(job)
 
     async def _run():
         try:
             async with _LEKTOR_LOCK:
+                if job['cancelled']:
+                    return
                 # przepuść lektora odpalonego poza serwerem (agent/Discord)
                 while _ext_lektor_running():
                     await asyncio.sleep(5)
+                    if job['cancelled']:
+                        return
+                job['state'] = 'running'
                 proc = await asyncio.create_subprocess_exec(
                     'python3', CZYTAJ_TTS, str(src), '-o', str(out),
                     '--format', fmt,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL)
+                job['proc'] = proc
                 await proc.wait()
+                if job['cancelled']:
+                    # przerwane — sprzątnij niedokończone pliki
+                    for suf in ('.mp3', '.wav', '.flac'):
+                        try:
+                            out.with_suffix(suf).unlink()
+                        except FileNotFoundError:
+                            pass
         finally:
-            _LEKTOR_JOBS.discard(str(out))
             try:
-                _LEKTOR_PENDING.remove(out.name)
+                _LEKTOR_QUEUE.remove(job)
             except ValueError:
                 pass
 
     asyncio.ensure_future(_run())
     return web.json_response(
         {'status': 'queued' if queued else 'start',
-         'out': out.name, 'position': len(_LEKTOR_PENDING)}, status=202)
+         'out': out.name, 'position': len(_LEKTOR_QUEUE)}, status=202)
 
 
 async def rename_item(request):
@@ -809,7 +892,33 @@ async def rename_item(request):
     return web.json_response({'renamed': target.name, 'to': new_name})
 
 
+async def lektor_cancel(request):
+    """POST ?lektorqdel=<id> — usunięcie pozycji z kolejki lektora;
+    trwająca generacja zostaje ubita (i sprzątnięte częściowe pliki)."""
+    try:
+        jid = int(request.query.get('lektorqdel', ''))
+    except ValueError:
+        return web.Response(status=400)
+    for j in _LEKTOR_QUEUE:
+        if j['id'] == jid:
+            j['cancelled'] = True
+            if j['state'] == 'running' and j.get('proc') is not None:
+                try:
+                    j['proc'].kill()
+                except ProcessLookupError:
+                    pass
+            else:
+                try:
+                    _LEKTOR_QUEUE.remove(j)
+                except ValueError:
+                    pass
+            return web.json_response({'cancelled': jid})
+    return web.Response(status=404)
+
+
 async def upload(request):
+    if 'lektorqdel' in request.query:
+        return await lektor_cancel(request)
     if 'rename' in request.query:
         return await rename_item(request)
     if 'lektor' in request.query:
