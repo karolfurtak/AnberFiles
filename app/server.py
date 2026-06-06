@@ -308,17 +308,41 @@ STYLE = (
 # Akcje plikowe: 🗑 usuń (→.kosz), ✎ zmień nazwę (prompt → POST ?rename=),
 # ⧉ kopiuj nazwę do schowka.
 DEL_JS = (
-    '<script>document.addEventListener("click",async e=>{'
+    '<script>'
+    # modal wyboru formatu — PRZYCISKI (nie wpisywanie rozszerzenia)
+    'function pickFmt(name){return new Promise(res=>{'
+    'const ov=document.createElement("div");'
+    'ov.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.5);'
+    'display:flex;align-items:center;justify-content:center;z-index:99";'
+    'ov.innerHTML=\'<div style="background:#fff;border-radius:10px;'
+    'padding:1.1em 1.4em;max-width:92vw;box-shadow:0 8px 30px rgba(0,0,0,.35)">'
+    '<div style="font-weight:600;margin-bottom:.35em;word-break:break-all">'
+    '🔊 Lektor: \'+name+\'</div>'
+    '<div style="color:#556;font-size:.9em;margin-bottom:.9em">'
+    'Wybierz format audio (generacja dłuższych dokumentów może potrwać '
+    'kilkanaście minut):</div>'
+    '<div style="display:flex;gap:.5em;flex-wrap:wrap">'
+    '<button data-f="">⚙ wg ustawień</button>'
+    '<button data-f="mp3">MP3</button>'
+    '<button data-f="flac">FLAC</button>'
+    '<button data-f="wav">WAV</button>'
+    '<button data-f="__x" style="margin-left:auto">Anuluj</button>'
+    '</div></div>\';'
+    'ov.querySelectorAll("button").forEach(b=>{'
+    'b.style.cssText+=";padding:.5em 1em;border:1px solid #b8c0cc;'
+    'border-radius:6px;background:#f2f5f9;cursor:pointer;font-size:1em";'
+    'b.onmouseenter=()=>b.style.background="#dde6f2";'
+    'b.onmouseleave=()=>b.style.background="#f2f5f9";'
+    'b.onclick=()=>{ov.remove();res(b.dataset.f==="__x"?null:b.dataset.f);};});'
+    'ov.onclick=e=>{if(e.target===ov){ov.remove();res(null);}};'
+    'document.body.appendChild(ov);});}'
+    'document.addEventListener("click",async e=>{'
     'const a=e.target.closest("a.del,a.ren,a.cpy,a.lek");if(!a)return;'
     'e.preventDefault();'
     'const n=decodeURIComponent(a.dataset.n);'
     'if(a.classList.contains("lek")){'
-    'let fm=prompt("Lektor dla \\""+n+"\\" — format docelowy:\\n'
-    'mp3 / flac / wav   (puste = wg ustawień lektora)\\n\\n'
-    'Generacja dłuższych dokumentów może potrwać kilkanaście minut.","");'
+    'const fm=await pickFmt(n);'
     'if(fm===null)return;'
-    'fm=fm.trim().toLowerCase();'
-    'if(fm&&!["mp3","flac","wav"].includes(fm)){alert("Nieznany format: "+fm);return;}'
     'a.textContent="⏳";'
     'try{'
     'let u=a.dataset.n+"?lektor=1"+(fm?"&fmt="+fm:"");'
@@ -670,13 +694,20 @@ _LEKTOR_SEQ = 0
 _LEKTOR_QUEUE: list = []   # rejestr zadań: id/out/src/fmt/state/cancelled/proc
 
 
-def _ext_lektor_running() -> bool:
-    """Czy JAKIKOLWIEK czytaj_tts.py działa (np. odpalony przez agenta
-    z Discorda)? Wykrywanie po procesie — wspólna kolejka obu źródeł."""
+def _ext_lektor_pids() -> set:
+    """PID-y czytaj_tts.py uruchomione POZA serwerem (agent z Discorda,
+    CLI) — pgrep minus nasze własne dzieci z kolejki."""
     import subprocess
     r = subprocess.run(['pgrep', '-f', 'czytaj_tts.py'],
                        capture_output=True, text=True)
-    return r.returncode == 0
+    pids = {int(x) for x in r.stdout.split()} if r.returncode == 0 else set()
+    ours = {j['proc'].pid for j in _LEKTOR_QUEUE
+            if j.get('proc') is not None and j['proc'].returncode is None}
+    return pids - ours
+
+
+def _ext_lektor_running() -> bool:
+    return bool(_ext_lektor_pids())
 
 
 def _lektor_busy() -> bool:
@@ -726,7 +757,8 @@ LEKTORQ_PAGE = (
     'const tb=document.getElementById("tb");let h="";let i=0;'
     'if(j.external){h+="<tr><td>—</td><td colspan=3 class=ext>'
     'lektor uruchomiony poza serwerem (agent Discord / CLI)</td>'
-    '<td class=run>GENERUJE</td><td></td></tr>";}'
+    '<td class=run>GENERUJE</td>'
+    '<td><a class=x data-i=ext href=#>✕</a></td></tr>";}'
     'for(const x of j.jobs){i++;'
     'h+="<tr><td>"+i+"</td><td>"+x.out+"</td><td style=\'color:#8a93a0\'>"'
     '+x.src+"</td><td>"+x.fmt+"</td><td class="'
@@ -893,10 +925,23 @@ async def rename_item(request):
 
 
 async def lektor_cancel(request):
-    """POST ?lektorqdel=<id> — usunięcie pozycji z kolejki lektora;
-    trwająca generacja zostaje ubita (i sprzątnięte częściowe pliki)."""
+    """POST ?lektorqdel=<id|ext> — usunięcie pozycji z kolejki lektora;
+    trwająca generacja zostaje ubita (i sprzątnięte częściowe pliki).
+    'ext' = przerwij lektora uruchomionego poza serwerem (agent/CLI)."""
+    raw_id = request.query.get('lektorqdel', '')
+    if raw_id == 'ext':
+        import signal
+        killed = []
+        for pid in _ext_lektor_pids():
+            try:
+                import os
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except ProcessLookupError:
+                pass
+        return web.json_response({'cancelled': 'ext', 'pids': killed})
     try:
-        jid = int(request.query.get('lektorqdel', ''))
+        jid = int(raw_id)
     except ValueError:
         return web.Response(status=400)
     for j in _LEKTOR_QUEUE:
