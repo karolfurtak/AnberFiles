@@ -88,7 +88,7 @@ GREEK = {'α': 'alfa', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'ε': 'epsilo
 SYMBOLS = {'≈': ' około ', '≤': ' mniejsze lub równe ', '≥': ' większe lub równe ',
            '±': ' plus minus ', '×': ' razy ', '→': ' do ', '⇄': ' lub ',
            '–': ' ', '—': ' . ', '·': ' razy ', '½': 'jedna druga',
-           '…': '.', '„': '', '"': '', '"': '', '»': '', '«': ''}
+           '…': '.', '„': '', '“': '', '”': '', '"': '', '»': '', '«': ''}
 
 ABBR = {'np.': 'na przykład', 'tzn.': 'to znaczy', 'tzw.': 'tak zwany',
         'itd.': 'i tak dalej', 'itp.': 'i tym podobne', 'm.in.': 'między innymi',
