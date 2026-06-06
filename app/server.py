@@ -309,9 +309,17 @@ STYLE = (
 # ⧉ kopiuj nazwę do schowka.
 DEL_JS = (
     '<script>document.addEventListener("click",async e=>{'
-    'const a=e.target.closest("a.del,a.ren,a.cpy");if(!a)return;'
+    'const a=e.target.closest("a.del,a.ren,a.cpy,a.lek");if(!a)return;'
     'e.preventDefault();'
     'const n=decodeURIComponent(a.dataset.n);'
+    'if(a.classList.contains("lek")){'
+    'a.textContent="⏳";'
+    'try{const r=await fetch(a.dataset.n+"?lektor=1",{method:"POST"});'
+    'const j=await r.json().catch(()=>({}));'
+    'if(r.status===202){a.title="Generuję: "+(j.out||"");'
+    'setTimeout(()=>a.textContent="🔊",2500);}'
+    'else{alert("Lektor: "+(j.status||r.status));a.textContent="🔊";}'
+    '}catch(err){alert("Błąd lektora");a.textContent="🔊";}return;}'
     'if(a.classList.contains("cpy")){'
     'try{await navigator.clipboard.writeText(n);'
     'a.textContent="✓";setTimeout(()=>a.textContent="⧉",900);}'
@@ -565,11 +573,15 @@ async def serve(request):
                             if (ext in IMG_EXT or ext in AUDIO_EXT
                                 or ext in ('.md', '.docx', '.doc'))
                             else q)
+                    lek = ('<a href="#" class="dl lek" data-n="' + q
+                           + '" title="Lektor → audio">🔊</a>'
+                           if ext in ('.md', '.docx', '.txt') else '')
                     rows.append(
                         f'<tr><td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
                         f'<a href="#" class="dl del" data-n="{q}" title="Usuń (do .kosz)">🗑</a>'
                         f'<a href="#" class="dl ren" data-n="{q}" title="Zmień nazwę">✎</a>'
                         f'<a href="#" class="dl cpy" data-n="{q}" title="Kopiuj nazwę">⧉</a>'
+                        f'{lek}'
                         f'<a href="{href}">{icon} {item.name}</a></td>'
                         f'<td data-sort="{s}">{_fmt_size(s)}</td>'
                         f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
@@ -625,6 +637,90 @@ async def delete_item(request):
     return web.json_response({'deleted': raw, 'kosz': dest.name})
 
 
+CZYTAJ_TTS = '/mnt/data/sprawozdania/EXPORT/czytaj_tts.py'
+LEKTOR_CONF = '/mnt/data/sprawozdania/EXPORT/lektor-ustawienia.conf'
+_LEKTOR_JOBS = set()    # ścieżki wyjściowe w trakcie generacji (dedup)
+
+
+def _lektor_fmt() -> str:
+    """Format z lektor-ustawienia.conf (mp3|wav|flac), domyślnie mp3."""
+    try:
+        for line in Path(LEKTOR_CONF).read_text().splitlines():
+            line = line.split('#', 1)[0]
+            if '=' in line:
+                k, v = line.split('=', 1)
+                if k.strip() == 'format' and v.strip() in ('mp3', 'wav', 'flac'):
+                    return v.strip()
+    except Exception:
+        pass
+    return 'mp3'
+
+
+def _docx_to_txt(p: Path) -> Path:
+    """Awaryjne źródło dla lektora: tekst wprost z DOCX (python-docx)."""
+    import docx
+    d = docx.Document(str(p))
+    parts = [par.text for par in d.paragraphs]
+    for tbl in d.tables:
+        for row in tbl.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                parts.append(' . '.join(cells))
+    tmp = Path('/tmp') / (p.stem + '_lektor_src.txt')
+    tmp.write_text('\n'.join(parts), encoding='utf-8')
+    return tmp
+
+
+async def lektor_item(request):
+    """POST ?lektor=1 na .md/.docx/.txt — generacja audio w TLE
+    (czytaj_tts.py). Wynik: <nazwa>_lektor.<fmt> obok pliku (fmt z conf);
+    auto-odświeżanie listingu pokaże go po zakończeniu."""
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return web.Response(status=400)
+    if ROOT not in target.parents or not target.is_file():
+        return web.Response(status=403)
+    ext = target.suffix.lower()
+    if ext not in ('.md', '.docx', '.txt'):
+        return web.Response(status=400, text='Lektor czyta .md/.docx/.txt')
+
+    # źródło tekstu: .md wprost; .docx → bliźniaczy .md (ten sam stem,
+    # ten katalog lub ../processed/) albo ekstrakcja tekstu z DOCX
+    src = target
+    if ext == '.docx':
+        for cand in (target.parent / (target.stem + '.md'),
+                     target.parent.parent / 'processed' / (target.stem + '.md')):
+            if cand.exists():
+                src = cand
+                break
+        else:
+            try:
+                src = _docx_to_txt(target)
+            except Exception as e:
+                return web.Response(status=500, text=f'Ekstrakcja DOCX: {e}')
+
+    fmt = _lektor_fmt()
+    out = target.parent / f'{target.stem}_lektor.{fmt}'
+    if str(out) in _LEKTOR_JOBS:
+        return web.json_response({'status': 'już generuję', 'out': out.name})
+    _LEKTOR_JOBS.add(str(out))
+
+    async def _run():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'python3', CZYTAJ_TTS, str(src), '-o', str(out),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+        finally:
+            _LEKTOR_JOBS.discard(str(out))
+
+    asyncio.ensure_future(_run())
+    return web.json_response({'status': 'start', 'out': out.name}, status=202)
+
+
 async def rename_item(request):
     """POST ?rename=<nowa-nazwa> na pliku/katalogu = zmiana nazwy (ten sam
     katalog, bez nadpisywania — 409 gdy cel istnieje)."""
@@ -650,6 +746,8 @@ async def rename_item(request):
 async def upload(request):
     if 'rename' in request.query:
         return await rename_item(request)
+    if 'lektor' in request.query:
+        return await lektor_item(request)
     """POST multipart na katalog = wgranie plików (drag&drop z przeglądarki).
     Duplikaty nazw dostają sufiks z timestampem (jak w bocie) — nic nie nadpisujemy."""
     raw = request.match_info.get('path', '').strip('/')
