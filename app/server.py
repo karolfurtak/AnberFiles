@@ -320,10 +320,22 @@ DEL_JS = (
     'fm=fm.trim().toLowerCase();'
     'if(fm&&!["mp3","flac","wav"].includes(fm)){alert("Nieznany format: "+fm);return;}'
     'a.textContent="⏳";'
-    'try{const r=await fetch(a.dataset.n+"?lektor=1"+(fm?"&fmt="+fm:""),'
-    '{method:"POST"});'
-    'const j=await r.json().catch(()=>({}));'
-    'if(r.status===202){a.title="Generuję: "+(j.out||"");'
+    'try{'
+    'let u=a.dataset.n+"?lektor=1"+(fm?"&fmt="+fm:"");'
+    'let r=await fetch(u,{method:"POST"});'
+    'let j=await r.json().catch(()=>({}));'
+    'if(j.status==="busy"){'
+    'a.textContent="🔊";'
+    'if(!confirm("Lektor jest teraz zajęty — czyta inny dokument'
+    '(np. na polecenie z Discorda)."+(j.pending?"\\nW kolejce czeka: "'
+    '+j.pending+" plik(ów).":"")+"\\n\\nDopisać ten plik do kolejki? '
+    'Audio wygeneruje się automatycznie, gdy przyjdzie jego kolej."))return;'
+    'a.textContent="⏳";'
+    'r=await fetch(u+"&queue=1",{method:"POST"});'
+    'j=await r.json().catch(()=>({}));}'
+    'if(r.status===202){'
+    'a.title=(j.status==="queued"?"W kolejce (poz. "+j.position+"): "'
+    ':"Generuję: ")+(j.out||"");'
     'setTimeout(()=>a.textContent="🔊",2500);}'
     'else{alert("Lektor: "+(j.status||r.status));a.textContent="🔊";}'
     '}catch(err){alert("Błąd lektora");a.textContent="🔊";}return;}'
@@ -646,7 +658,24 @@ async def delete_item(request):
 
 CZYTAJ_TTS = '/mnt/data/sprawozdania/EXPORT/czytaj_tts.py'
 LEKTOR_CONF = '/mnt/data/sprawozdania/EXPORT/lektor-ustawienia.conf'
-_LEKTOR_JOBS = set()    # ścieżki wyjściowe w trakcie generacji (dedup)
+_LEKTOR_JOBS = set()       # ścieżki wyjściowe w trakcie/kolejce (dedup)
+_LEKTOR_LOCK = None        # asyncio.Lock tworzony leniwie (jeden lektor naraz)
+_LEKTOR_PENDING = []       # nazwy oczekujące/generowane (podgląd kolejki)
+
+
+def _ext_lektor_running() -> bool:
+    """Czy JAKIKOLWIEK czytaj_tts.py działa (np. odpalony przez agenta
+    z Discorda)? Wykrywanie po procesie — wspólna kolejka obu źródeł."""
+    import subprocess
+    r = subprocess.run(['pgrep', '-f', 'czytaj_tts.py'],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _lektor_busy() -> bool:
+    global _LEKTOR_LOCK
+    return bool(_LEKTOR_PENDING) or _ext_lektor_running() \
+        or (_LEKTOR_LOCK is not None and _LEKTOR_LOCK.locked())
 
 
 def _lektor_fmt() -> str:
@@ -713,22 +742,44 @@ async def lektor_item(request):
         fmt = 'mp3'
     out = target.parent / f'{target.stem}_lektor.{fmt}'
     if str(out) in _LEKTOR_JOBS:
-        return web.json_response({'status': 'już generuję', 'out': out.name})
+        return web.json_response({'status': 'duplikat', 'out': out.name})
+
+    # lektor zajęty (przeglądarka ALBO agent z Discorda) → bez flagi queue
+    # zwracamy 'busy'; UI pyta usera o dopisanie do kolejki
+    if _lektor_busy() and 'queue' not in request.query:
+        return web.json_response(
+            {'status': 'busy', 'pending': len(_LEKTOR_PENDING)})
+
+    global _LEKTOR_LOCK
+    if _LEKTOR_LOCK is None:
+        _LEKTOR_LOCK = asyncio.Lock()
     _LEKTOR_JOBS.add(str(out))
+    _LEKTOR_PENDING.append(out.name)
+    queued = _lektor_busy() and len(_LEKTOR_PENDING) > 1
 
     async def _run():
         try:
-            proc = await asyncio.create_subprocess_exec(
-                'python3', CZYTAJ_TTS, str(src), '-o', str(out),
-                '--format', fmt,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL)
-            await proc.wait()
+            async with _LEKTOR_LOCK:
+                # przepuść lektora odpalonego poza serwerem (agent/Discord)
+                while _ext_lektor_running():
+                    await asyncio.sleep(5)
+                proc = await asyncio.create_subprocess_exec(
+                    'python3', CZYTAJ_TTS, str(src), '-o', str(out),
+                    '--format', fmt,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL)
+                await proc.wait()
         finally:
             _LEKTOR_JOBS.discard(str(out))
+            try:
+                _LEKTOR_PENDING.remove(out.name)
+            except ValueError:
+                pass
 
     asyncio.ensure_future(_run())
-    return web.json_response({'status': 'start', 'out': out.name}, status=202)
+    return web.json_response(
+        {'status': 'queued' if queued else 'start',
+         'out': out.name, 'position': len(_LEKTOR_PENDING)}, status=202)
 
 
 async def rename_item(request):
