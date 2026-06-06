@@ -803,13 +803,20 @@ async def _lektor_run(job: dict):
             job['state'] = 'running'
             import time as _t
             job['started'] = _t.time()
+            # stderr do logu — bez tego pad lektora był niemy (incydent:
+            # zadanie znikało z kolejki bez śladu i bez pliku)
+            errlog = open('/mnt/data/lektor_errors.log', 'ab')
+            errlog.write(f'\n=== {Path(job["out"]).name} ===\n'.encode())
             proc = await asyncio.create_subprocess_exec(
                 'python3', CZYTAJ_TTS, job['src'], '-o', job['out'],
                 '--format', job['fmt'],
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL)
+                stderr=errlog)
             job['proc'] = proc
             await proc.wait()
+            errlog.close()
+            if proc.returncode not in (0, None) and not job['cancelled']:
+                job['state'] = 'failed'
             if job['cancelled']:
                 # przerwane — sprzątnij TYLKO pliki powstałe w trakcie
                 # TEGO zadania (mtime > start)
