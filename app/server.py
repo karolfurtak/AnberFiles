@@ -726,13 +726,40 @@ def _lektor_busy() -> bool:
         or (_LEKTOR_LOCK is not None and _LEKTOR_LOCK.locked())
 
 
+def _lektor_progress():
+    """Postęp bieżącej generacji (pisze czytaj_tts.py; lektor jest jeden,
+    więc plik globalny wystarcza). None = brak danych."""
+    import json
+    import time as _t
+    try:
+        p = Path('/tmp/lektor_progress.json')
+        if _t.time() - p.stat().st_mtime > 300:   # stęchły = po crashu
+            return None
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
 def _lektor_queue_json() -> dict:
-    jobs = [{'id': j['id'], 'out': Path(j['out']).name,
+    prog = _lektor_progress()
+    jobs = []
+    for j in _LEKTOR_QUEUE:
+        if j['cancelled']:
+            continue
+        e = {'id': j['id'], 'out': Path(j['out']).name,
              'src': str(Path(j['src']).relative_to(ROOT))
              if str(j['src']).startswith(str(ROOT)) else Path(j['src']).name,
              'fmt': j['fmt'], 'state': j['state']}
-            for j in _LEKTOR_QUEUE if not j['cancelled']]
-    return {'jobs': jobs, 'external': _ext_lektor_running()}
+        if j['state'] == 'running' and prog:
+            e['pct'] = prog.get('pct', 0)
+            e['chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
+        jobs.append(e)
+    ext = _ext_lektor_running()
+    out = {'jobs': jobs, 'external': ext}
+    if ext and prog and not any(j['state'] == 'running' for j in jobs):
+        out['ext_pct'] = prog.get('pct', 0)
+        out['ext_chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
+    return out
 
 
 LEKTORQ_PAGE = (
@@ -754,6 +781,12 @@ LEKTORQ_PAGE = (
     '.run{color:#7ce38b}.que{color:#e0c060}.ext{color:#8a93a0;font-style:italic}'
     '.x{color:#ff7b72;cursor:pointer;text-decoration:none;font-weight:700}'
     '.empty{text-align:center;color:#8a93a0;padding:2em}'
+    '.pb{width:130px;height:13px;background:#262b35;border-radius:7px;'
+    'overflow:hidden;display:inline-block;vertical-align:middle;'
+    'margin-right:.5em}'
+    '.pb>i{display:block;height:100%;background:linear-gradient(90deg,'
+    '#2f81f7,#7ce38b);transition:width .8s}'
+    '.pct{font-size:.85em;color:#9aa4b1}'
     '</style>'
     '<div class="bar"><a href="/">📁 pliki</a>'
     '<h2>🔊 Kolejka lektora</h2>'
@@ -765,15 +798,18 @@ LEKTORQ_PAGE = (
     'async function load(){'
     'try{const j=await(await fetch("/?lektorqj=1",{cache:"no-store"})).json();'
     'const tb=document.getElementById("tb");let h="";let i=0;'
+    'function bar(p,c){return p==null?"GENERUJE":'
+    '"<span class=pb><i style=\'width:"+p+"%\'></i></span>'
+    '<span class=pct>"+p+"% ("+(c||"")+")</span>";}'
     'if(j.external){h+="<tr><td>—</td><td colspan=3 class=ext>'
     'lektor uruchomiony poza serwerem (agent Discord / CLI)</td>'
-    '<td class=run>GENERUJE</td>'
+    '<td class=run>"+bar(j.ext_pct,j.ext_chunk)+"</td>'
     '<td><a class=x data-i=ext href=#>✕</a></td></tr>";}'
     'for(const x of j.jobs){i++;'
     'h+="<tr><td>"+i+"</td><td>"+x.out+"</td><td style=\'color:#8a93a0\'>"'
     '+x.src+"</td><td>"+x.fmt+"</td><td class="'
     '+(x.state==="running"?"run":"que")+">"'
-    '+(x.state==="running"?"GENERUJE":"czeka")+"</td>'
+    '+(x.state==="running"?bar(x.pct,x.chunk):"czeka")+"</td>'
     '<td><a class=x data-i="+x.id+" href=#>✕</a></td></tr>";}'
     'if(!h)h="<tr><td colspan=6 class=empty>Kolejka pusta — lektor wolny</td></tr>";'
     'tb.innerHTML=h;'
