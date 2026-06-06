@@ -224,6 +224,7 @@ STYLE = (
     'h2 a{color:#0066cc}h2 .sep{color:#bbb;font-weight:400}'
     '.dl{margin-right:.45em;text-decoration:none;opacity:.55}'
     '.dl:hover{opacity:1;text-decoration:none}'
+    '.del:hover{filter:drop-shadow(0 0 2px #c00)}'
     '.crumb{position:relative;display:inline-block}'
     '.crumb>.dd{display:none;position:absolute;top:100%;left:0;background:#fff;'
     'border:1px solid #c5cdd8;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.18);'
@@ -237,6 +238,21 @@ STYLE = (
     'font-size:1.5em;z-index:50;visibility:hidden;pointer-events:none;'
     'text-align:center;padding:1em}'
     '#dropov.on{visibility:visible}'
+)
+
+# Usuwanie plików — 🗑 przy pliku: confirm → HTTP DELETE → plik ląduje
+# w ROOT/.kosz/ (timestamp_nazwa), wiersz znika od razu.
+DEL_JS = (
+    '<script>document.addEventListener("click",async e=>{'
+    'const a=e.target.closest("a.del");if(!a)return;'
+    'e.preventDefault();'
+    'const n=decodeURIComponent(a.dataset.n);'
+    'if(!confirm("Usunąć \\""+n+"\\"?\\n(plik trafi do kosza .kosz)"))return;'
+    'try{const r=await fetch(a.dataset.n,{method:"DELETE"});'
+    'if(r.ok){a.closest("tr").remove();}'
+    'else{alert("Błąd usuwania: HTTP "+r.status);}'
+    '}catch(err){alert("Błąd usuwania");}'
+    '});</script>'
 )
 
 # Drag & drop upload — upuszczenie plików na listing wgrywa je do bieżącego
@@ -473,6 +489,7 @@ async def serve(request):
                             else q)
                     rows.append(
                         f'<tr><td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
+                        f'<a href="#" class="dl del" data-n="{q}" title="Usuń (do .kosz)">🗑</a>'
                         f'<a href="{href}">{icon} {item.name}</a></td>'
                         f'<td data-sort="{s}">{_fmt_size(s)}</td>'
                         f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
@@ -495,11 +512,37 @@ async def serve(request):
             '</tbody></table>',
             SORT_JS,
             DROP_JS,
+            DEL_JS,
         ]
         return web.Response(text='\n'.join(html), content_type='text/html')
 
     # plik — ?dl=1 wymusza pobieranie, ?view=1 dla zdjęć otwiera przeglądarkę
     return await _serve_file(request, target)
+
+
+async def delete_item(request):
+    """DELETE na pliku = przeniesienie do ROOT/.kosz/ (nic nie znika trwale).
+    Katalogi: tylko puste (rmdir). .kosz ukryty w listingu (dotfile)."""
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return web.Response(status=400)
+    if ROOT not in target.parents:          # ROOT samego nie ruszamy
+        return web.Response(status=403)
+    if not target.exists():
+        return web.Response(status=404)
+    if target.is_dir():
+        if any(target.iterdir()):
+            return web.Response(status=400, text='Katalog niepusty')
+        target.rmdir()
+        return web.json_response({'deleted': raw})
+    trash = ROOT / '.kosz'
+    trash.mkdir(exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    dest = trash / f'{ts}_{target.name}'
+    target.rename(dest)
+    return web.json_response({'deleted': raw, 'kosz': dest.name})
 
 
 async def upload(request):
@@ -597,6 +640,7 @@ def main():
     app = web.Application(middlewares=[auth], client_max_size=512 * 1024 ** 2)
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)
+    app.router.add_delete('/{path:.*}', delete_item)
     auth_info = f'user={USER}' if PASSW else 'OPEN (no auth)'
     print(f'sprawozdania-server: http://{HOST}:{PORT}/ — {auth_info}', flush=True)
     web.run_app(app, host=HOST, port=PORT, access_log=None)
