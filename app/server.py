@@ -731,6 +731,7 @@ _LEKTOR_LOCK = None        # asyncio.Lock tworzony leniwie (jeden lektor naraz)
 _LEKTOR_SEQ = 0
 _LEKTOR_QUEUE: list = []   # rejestr zadań: id/out/src/fmt/state/cancelled/proc
 _LEKTOR_PAUSED = False     # pauza całej kolejki (⏸ w widoku kolejki)
+_LEKTOR_SHUTDOWN = False   # „wyłącz konsolę po ukończeniu kolejki" (⏻)
 
 
 LEKTOR_QFILE = Path('/mnt/data/lektor_queue.json')
@@ -743,6 +744,7 @@ def _lektor_save_queue():
     try:
         LEKTOR_QFILE.write_text(json.dumps({
             'paused': _LEKTOR_PAUSED,
+            'shutdown': _LEKTOR_SHUTDOWN,
             'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt']}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
             ensure_ascii=False))
@@ -754,12 +756,14 @@ async def _lektor_restore(app):
     """on_startup: odtwórz kolejkę z dysku. Zadanie, które właśnie generuje
     osierocony proces (KillMode=process), pomijamy — dokończy się samo."""
     import json
-    global _LEKTOR_PAUSED
+    global _LEKTOR_PAUSED, _LEKTOR_SHUTDOWN
     try:
         data = json.loads(LEKTOR_QFILE.read_text())
     except Exception:
         return
     _LEKTOR_PAUSED = bool(data.get('paused'))
+    _LEKTOR_SHUTDOWN = bool(data.get('shutdown'))
+    asyncio.ensure_future(_lektor_shutdown_watch())
     prog = _lektor_progress()
     busy_stem = Path(prog['out']).stem if prog else None
     for it in data.get('jobs', []):
@@ -839,6 +843,7 @@ async def _lektor_run(job: dict):
             pass
         if not shutdown:
             _lektor_save_queue()
+            _lektor_maybe_shutdown()
 
 
 def _ext_lektor_pids() -> set:
@@ -903,7 +908,7 @@ def _lektor_queue_json() -> dict:
         jobs.append(e)
     ext = _ext_lektor_running()
     out = {'jobs': jobs, 'external': ext, 'paused': _LEKTOR_PAUSED,
-           'bat': _battery_html()}
+           'shutdown': _LEKTOR_SHUTDOWN, 'bat': _battery_html()}
     if ext and prog and not any(j['state'] == 'running' for j in jobs):
         out['ext_pct'] = prog.get('pct', 0)
         out['ext_chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
@@ -951,7 +956,9 @@ LEKTORQ_PAGE = (
     '<h2><a href="/" class="dir">📁 root</a> <span class="sep">/</span> '
     '🔊 Kolejka lektora</h2>'
     '<p class="muted">podgląd na żywo (co 3 s) · ✕ usuwa pozycję '
-    '(trwająca generacja zostaje przerwana) · <span id="st"></span></p>'
+    '(trwająca generacja zostaje przerwana) · '
+    '<a id="shd" href="#" style="text-decoration:none"></a>'
+    ' · <span id="st"></span></p>'
     '<table><thead><tr><th>#</th><th>plik wynikowy</th><th>źródło</th>'
     '<th>format</th><th>stan</th><th></th></tr></thead>'
     '<tbody id="tb"></tbody></table>'
@@ -989,6 +996,11 @@ LEKTORQ_PAGE = (
     'tb.innerHTML=h;'
     'document.getElementById("st").innerHTML='
     '"odświeżono "+new Date().toLocaleTimeString()+(j.bat||"");'
+    'const sh=document.getElementById("shd");'
+    'sh.dataset.on=j.shutdown?"1":"0";'
+    'sh.innerHTML=j.shutdown'
+    '?"⏻ wyłącz konsolę po ukończeniu: <b style=\'color:#1d7a36\'>WŁĄCZONE</b>"'
+    ':"⏻ wyłącz konsolę po ukończeniu: <b style=\'color:#888\'>wyłączone</b>";'
     '}catch(e){}}'
     # pauza: pytanie co dalej — następny plik czy wstrzymanie całej kolejki
     'function askPause(ext){return new Promise(res=>{'
@@ -1014,6 +1026,13 @@ LEKTORQ_PAGE = (
     'ov.onclick=e=>{if(e.target===ov){ov.remove();res(null);}};'
     'document.body.appendChild(ov);});}'
     'document.addEventListener("click",async e=>{'
+    'const s=e.target.closest("a#shd");'
+    'if(s){e.preventDefault();'
+    'const to=s.dataset.on==="1"?"0":"1";'
+    'if(to==="1"&&!confirm("Konsola WYŁĄCZY SIĘ automatycznie po '
+    'ukończeniu wszystkich pozycji kolejki (1 min na anulowanie). '
+    'Włączyć?"))return;'
+    'await fetch("/?lektorqshutdown="+to,{method:"POST"});load();return;}'
     'const r=e.target.closest("a#res");'
     'if(r){e.preventDefault();'
     'await fetch("/?lektorqresume=1",{method:"POST"});load();return;}'
@@ -1245,7 +1264,50 @@ async def lektor_cancel(request):
     return web.Response(status=404)
 
 
+async def lektor_shutdown_toggle(request):
+    """POST ?lektorqshutdown=1|0 — wyłączenie konsoli po ukończeniu kolejki.
+    0 anuluje też zaplanowane już `shutdown` (gdy kolejka właśnie się
+    skończyła i odliczanie trwa)."""
+    global _LEKTOR_SHUTDOWN
+    import subprocess
+    val = request.query.get('lektorqshutdown', '0') == '1'
+    _LEKTOR_SHUTDOWN = val
+    _lektor_save_queue()
+    if not val:
+        subprocess.run(['shutdown', '-c'], capture_output=True)
+    else:
+        _lektor_maybe_shutdown()
+    return web.json_response({'shutdown': _LEKTOR_SHUTDOWN})
+
+
+def _lektor_maybe_shutdown():
+    """Kolejka pusta + nic nie generuje + flaga ⏻ → shutdown za 1 min
+    (okno na anulowanie togglem); flaga konsumowana."""
+    global _LEKTOR_SHUTDOWN
+    if not _LEKTOR_SHUTDOWN:
+        return
+    if _LEKTOR_QUEUE or _ext_lektor_running():
+        return
+    import subprocess
+    subprocess.run(['shutdown', '-h', '+1',
+                    'Lektor ukończył kolejkę — wyłączanie'],
+                   capture_output=True)
+    _LEKTOR_SHUTDOWN = False
+    _lektor_save_queue()
+
+
+async def _lektor_shutdown_watch():
+    """Strażnik flagi ⏻ dla zadań ZEWNĘTRZNYCH (agent) — _lektor_run ich
+    nie widzi, więc sprawdzamy co 60 s."""
+    while True:
+        await asyncio.sleep(60)
+        if _LEKTOR_SHUTDOWN:
+            _lektor_maybe_shutdown()
+
+
 async def upload(request):
+    if 'lektorqshutdown' in request.query:
+        return await lektor_shutdown_toggle(request)
     if 'lektorqpause' in request.query:
         return await lektor_pause(request)
     if 'lektorqresume' in request.query:
