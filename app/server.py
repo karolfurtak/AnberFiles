@@ -740,7 +740,12 @@ async def lektor_item(request):
     fmt = request.query.get('fmt', '').lower() or _lektor_fmt()
     if fmt not in ('mp3', 'wav', 'flac'):
         fmt = 'mp3'
-    out = target.parent / f'{target.stem}_lektor.{fmt}'
+    # konwencja sprawozdań: źródło w processed/ → audio do exports/ obok
+    # (ta sama lokalizacja co lektor agenta z Discorda); inaczej obok pliku
+    out_dir = target.parent
+    if out_dir.name == 'processed' and (out_dir.parent / 'exports').is_dir():
+        out_dir = out_dir.parent / 'exports'
+    out = out_dir / f'{target.stem}_lektor.{fmt}'
     if str(out) in _LEKTOR_JOBS:
         return web.json_response({'status': 'duplikat', 'out': out.name})
 
