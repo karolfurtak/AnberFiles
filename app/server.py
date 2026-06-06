@@ -889,6 +889,7 @@ def _lektor_queue_json() -> dict:
     if ext and prog and not any(j['state'] == 'running' for j in jobs):
         out['ext_pct'] = prog.get('pct', 0)
         out['ext_chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
+        out['ext_out'] = prog.get('out', '')
     return out
 
 
@@ -943,9 +944,12 @@ LEKTORQ_PAGE = (
     'color:#7a5b00;font-weight:600;text-align:center;padding:.7em\'>'
     '⏸ KOLEJKA WSTRZYMANA &nbsp; '
     '<a id=res href=# style=\'color:#1a5fb4\'>▶ wznów</a></td></tr>";}'
-    'if(j.external){h+="<tr><td>—</td><td colspan=3 class=ext>'
-    'lektor uruchomiony poza serwerem (agent Discord / CLI)</td>'
-    '<td class="+(j.paused?"que":"run")+">"'
+    'if(j.external){h+="<tr><td>—</td><td colspan=3>"'
+    '+(j.ext_out?j.ext_out+" <span class=ext>(proces niezależny — '
+    'zlecenie agenta albo kontynuacja po restarcie serwera)</span>"'
+    ':"<span class=ext>lektor uruchomiony poza serwerem '
+    '(agent Discord / CLI)</span>")'
+    '+"</td><td class="+(j.paused?"que":"run")+">"'
     '+(j.paused?"⏸ wstrzymane":bar(j.ext_pct,j.ext_chunk))+"</td>"'
     '+acts("ext",!j.paused)+"</tr>";}'
     'for(const x of j.jobs){i++;'
