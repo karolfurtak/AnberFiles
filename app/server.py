@@ -313,6 +313,17 @@ STYLE = (
     '.crumb>.dd a{display:block;padding:.3em .9em;white-space:nowrap;font-size:.85em}'
     '.crumb>.dd a:hover{background:#eef2f7}'
     '.crumb>.dd a.cur{font-weight:700;color:#1a5fb4}'
+    # TRYB MOBILNY (telefon): prostszy interfejs — bez usuwania/zmiany
+    # nazwy/kopiowania nazwy; większe pola dotyku; mniej kolumn
+    '@media (max-width:700px){'
+    'body{margin:.6em auto;padding:0 .5em}'
+    'a.del,a.ren,a.cpy{display:none}'
+    'th:nth-child(4),td:nth-child(4){display:none}'   # kolumna Utworzono
+    'th,td{padding:.85em .55em;font-size:1.02em}'
+    '.dl{font-size:1.35em;padding:.15em .25em;margin-right:.4em}'
+    'h2{font-size:1.05em}'
+    '.crumb>.dd a{padding:.7em 1em;font-size:1em}'
+    '}'
     '#dropov{position:fixed;inset:0;display:flex;align-items:center;'
     'justify-content:center;background:rgba(15,50,110,.88);color:#fff;'
     'font-size:1.5em;z-index:50;visibility:hidden;pointer-events:none;'
@@ -921,6 +932,14 @@ LEKTORQ_PAGE = (
     '.pb>i{display:block;height:100%;background:linear-gradient(90deg,'
     '#3584e4,#33a02c);transition:width .8s}'
     '.pct{font-size:.85em;color:#888}'
+    # mobile: bez kolumny źródła, duże pola dotyku dla ⏸/✕
+    '@media (max-width:700px){'
+    'body{margin:.6em auto;padding:0 .5em}'
+    'th:nth-child(3),td:nth-child(3){display:none}'
+    'th,td{padding:.8em .5em}'
+    '.x,.p{font-size:1.3em;padding:.2em .3em}'
+    '.pb{width:90px}'
+    '}'
     '</style>'
     '<h2><a href="/" class="dir">📁 root</a> <span class="sep">/</span> '
     '🔊 Kolejka lektora</h2>'
