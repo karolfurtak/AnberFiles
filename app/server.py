@@ -27,6 +27,21 @@ except Exception:
     _markdown = None
 
 
+def _battery_html() -> str:
+    """Poziom baterii konsoli (PMIC axp2202) do linii informacyjnej —
+    aktualizuje się razem z auto-odświeżaniem listingu."""
+    try:
+        base = Path('/sys/class/power_supply/axp2202-battery')
+        cap = int((base / 'capacity').read_text().strip())
+        st = (base / 'status').read_text().strip()
+    except Exception:
+        return ''
+    ikona = '⚡' if st in ('Charging', 'Full') else '🔋'
+    col = '#1d7a36' if cap > 40 else ('#9a7b00' if cap > 15 else '#c00')
+    return (f' · <span style="color:{col};font-weight:600">'
+            f'{ikona} {cap}%</span>')
+
+
 def _natkey(s: str):
     """Klucz sortowania naturalnego: 'plik_10' PO 'plik_9' (liczby jako liczby)."""
     return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
@@ -657,7 +672,8 @@ async def serve(request):
             f'<style>{STYLE}</style>',
             f'<h2>{breadcrumb}</h2>',
             f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
-            f'⟳ auto-odświeżanie · <a href="/?lektorq=1">🔊 kolejka lektora</a></p>',
+            f'⟳ auto-odświeżanie · <a href="/?lektorq=1">🔊 kolejka lektora</a>'
+            f'{_battery_html()}</p>',
             '<table><thead><tr>'
             '<th>Nazwa</th><th>Rozmiar</th><th>Modyfikacja</th><th>Utworzono</th>'
             '</tr></thead><tbody>',
@@ -868,7 +884,8 @@ def _lektor_queue_json() -> dict:
             e['chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
         jobs.append(e)
     ext = _ext_lektor_running()
-    out = {'jobs': jobs, 'external': ext, 'paused': _LEKTOR_PAUSED}
+    out = {'jobs': jobs, 'external': ext, 'paused': _LEKTOR_PAUSED,
+           'bat': _battery_html()}
     if ext and prog and not any(j['state'] == 'running' for j in jobs):
         out['ext_pct'] = prog.get('pct', 0)
         out['ext_chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
@@ -940,8 +957,8 @@ LEKTORQ_PAGE = (
     '+"</td>"+acts(x.id,run)+"</tr>";}'
     'if(!h)h="<tr><td colspan=6 class=empty>Kolejka pusta — lektor wolny</td></tr>";'
     'tb.innerHTML=h;'
-    'document.getElementById("st").textContent='
-    '"odświeżono "+new Date().toLocaleTimeString();'
+    'document.getElementById("st").innerHTML='
+    '"odświeżono "+new Date().toLocaleTimeString()+(j.bat||"");'
     '}catch(e){}}'
     # pauza: pytanie co dalej — następny plik czy wstrzymanie całej kolejki
     'function askPause(ext){return new Promise(res=>{'
