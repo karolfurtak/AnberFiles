@@ -31,11 +31,43 @@ ale serwuje dowolne drzewo katalogów.
   (POST multipart, limit 512 MB, wiele plików naraz)
 - duplikaty nazw dostają sufiks z timestampem — nic nie jest nadpisywane
 
+**Akcje przy pliku:**
+- **🗑 usuwanie** do kosza `ROOT/.kosz/` (timestamp_nazwa — nic nie znika trwale)
+- **✎ zmiana nazwy** (bez nadpisywania — 409 przy konflikcie)
+- **⧉ kopiowanie nazwy** do schowka
+- **🔊 lektor** (przy `.md`/`.docx`/`.txt`) — patrz niżej
+
 **Przeglądarka zdjęć (`?view=1`):**
 - nawigacja poprzednie/następne (przyciski + strzałki ←/→)
 - zoom kółkiem myszy wokół kursora (0,2×–20×), przesuwanie przeciąganiem
 - dwuklik: dopasuj do okna ⇄ 1:1; przyciski „⊡ dopasuj" i „1:1"; klawisze `0`/`1`/`+`/`−`
 - ciemny motyw, licznik pozycji i % powiększenia
+
+**Podgląd dokumentów (`?view=1`):**
+- **.md** — zakładki Render (markdown + MathJax dla `$…$`) / Kod; resolver
+  obrazków (gołe nazwy → `raw/`, `processed/`, `szablony/`); nawigacja ←/→
+  po plikach .md; auto-odświeżanie treści (poll mtime co 3 s)
+- **.docx** — konwersja LibreOffice→PDF z cache per wersja pliku (pierwsze
+  otwarcie ~20 s na A53, kolejne natychmiast); PDF inline w przeglądarce
+
+**Odtwarzacz audio (`?view=1` dla mp3/flac/wav/ogg):**
+- natywny `<audio>` z autostartem, poprzedni/następny (też strzałkami),
+  **auto-playlista po katalogu**, **tempo 0,75–2×** (zapamiętywane),
+  spacja = pauza; poprawny MIME dla `.flac`
+
+**Lektor TTS (🔊 / `POST ?lektor=1[&fmt=][&queue=1]`):**
+- silnik: `tools/czytaj_tts.py` (edge-tts pl-PL 96 kbps + pełna polska
+  normalizacja liczb/jednostek/dat/symboli; wstawki „(z ang. …)" czyta
+  głos angielski) — wynik `<nazwa>_lektor.<mp3|flac|wav>`
+- wybór formatu radiobuttonami; **wspólna kolejka** dla przycisku 🔊
+  i zadań spoza serwera (wykrywanie po procesie)
+- **widok kolejki** (`/?lektorq=1`, link w listingu): podgląd na żywo,
+  pasek postępu (chunk n/N), usuwanie ✕ (też przerwanie trwającej
+  generacji), **pauza ⏸** (następny plik / wstrzymanie całej kolejki,
+  SIGSTOP) i ▶ wznowienie
+- **trwałość**: rejestr kolejki na dysku + checkpoint per chunk — kolejka
+  i postęp przeżywają restart serwera i **reboot urządzenia** (wznowienie
+  od ostatniego ukończonego chunka)
 
 **Bezpieczeństwo:**
 - HTTP Basic Auth (konfigurowany przez env; pusty `SERVER_PASS` = open access,
