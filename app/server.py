@@ -906,8 +906,10 @@ async def lektor_item(request):
     if _LEKTOR_LOCK is None:
         _LEKTOR_LOCK = asyncio.Lock()
     _LEKTOR_SEQ += 1
+    import time as _t
     job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
-           'state': 'queued', 'cancelled': False, 'proc': None}
+           'state': 'queued', 'cancelled': False, 'proc': None,
+           'started': _t.time()}
     queued = bool(_LEKTOR_QUEUE) or _ext_lektor_running()
     _LEKTOR_QUEUE.append(job)
 
@@ -930,10 +932,15 @@ async def lektor_item(request):
                 job['proc'] = proc
                 await proc.wait()
                 if job['cancelled']:
-                    # przerwane — sprzątnij niedokończone pliki
+                    # przerwane — sprzątnij TYLKO pliki powstałe w trakcie
+                    # TEGO zadania (mtime > start); starsze gotowe audio
+                    # o innym rozszerzeniu zostaje (incydent: kasowało
+                    # wcześniejszy _lektor.mp3 przy anulowaniu .wav)
                     for suf in ('.mp3', '.wav', '.flac'):
+                        p = out.with_suffix(suf)
                         try:
-                            out.with_suffix(suf).unlink()
+                            if p.stat().st_mtime >= job['started']:
+                                p.unlink()
                         except FileNotFoundError:
                             pass
         finally:
