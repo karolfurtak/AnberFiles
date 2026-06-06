@@ -69,6 +69,31 @@ MD_STYLE = (
 )
 
 
+def _fix_md_imgs(body: str, md_dir: Path) -> str:
+    """Obrazki w .md bywaja zapisane gola nazwa, a fizycznie leza w raw/
+    obok (md w processed/). Znajdz plik i przepisz src na sciezke wzgledna
+    dzialajaca z URL-a strony podgladu."""
+    def repl(m):
+        src = m.group(2)
+        if src.startswith(('http://', 'https://', 'data:', '/')):
+            return m.group(0)
+        name = Path(src).name
+        cands = [md_dir / src, md_dir / name,
+                 md_dir.parent / 'raw' / name, md_dir / 'raw' / name,
+                 md_dir.parent / 'exports' / name,
+                 md_dir.parent / 'processed' / name]
+        for c in cands:
+            try:
+                cr = c.resolve()
+            except Exception:
+                continue
+            if cr.exists() and (ROOT in cr.parents):
+                rel = os.path.relpath(cr, md_dir).replace(os.sep, '/')
+                return m.group(1) + quote(rel) + m.group(3)
+        return m.group(0)
+    return re.sub(r'(<img[^>]*?src=")([^"]+)(")', repl, body)
+
+
 def render_md_page(target: Path) -> str:
     """Podgląd .md: zakładki Render (markdown+MathJax) / Kod (surowe źródło).
     Względne ścieżki obrazków działają — strona żyje w katalogu pliku."""
@@ -76,10 +101,22 @@ def render_md_page(target: Path) -> str:
     if _markdown is not None:
         body = _markdown.markdown(
             src, extensions=['tables', 'fenced_code', 'nl2br', 'sane_lists'])
+        body = _fix_md_imgs(body, target.parent)
     else:
         body = '<p><i>(brak biblioteki python-markdown — dostępny tylko Kod)</i></p>'
     raw = _html.escape(src)
     q = quote(target.name)
+    # nawigacja po plikach .md w tym katalogu (jak w viewerze zdjec)
+    sibs = sorted((x.name for x in target.parent.iterdir()
+                   if x.is_file() and x.suffix.lower() == '.md'
+                   and not x.name.startswith('.')), key=_natkey)
+    idx = sibs.index(target.name) if target.name in sibs else 0
+    prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
+    nxt = quote(sibs[idx + 1]) + '?view=1' if idx < len(sibs) - 1 else None
+    a_prev = (f'<a href="{prv}" id="prev">← poprzedni</a>' if prv
+              else '<a style="opacity:.3;pointer-events:none">← poprzedni</a>')
+    a_next = (f'<a href="{nxt}" id="next">następny →</a>' if nxt
+              else '<a style="opacity:.3;pointer-events:none">następny →</a>')
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -88,10 +125,11 @@ def render_md_page(target: Path) -> str:
         'displayMath:[["$$","$$"]]}};</script>'
         '<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/'
         'tex-mml-chtml.js"></script>'
-        f'<div class="bar"><a href="./">📁 folder</a>'
+        f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
         f'<button id="bren" class="on">Render</button>'
         f'<button id="braw">Kod</button>'
         f'<span class="name">{target.name}</span>'
+        f'<span style="color:#888">{idx + 1} / {len(sibs)}</span>'
         f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
         f'<div id="rendered">{body}</div>'
         f'<div id="raw"><pre>{raw}</pre></div>'
@@ -103,6 +141,11 @@ def render_md_page(target: Path) -> str:
         'w.style.display=ren?"none":"block";'
         'br.classList.toggle("on",ren);bw.classList.toggle("on",!ren);}'
         'br.onclick=()=>show(true);bw.onclick=()=>show(false);'
+        'document.addEventListener("keydown",e=>{'
+        'if(e.key==="ArrowLeft"){const a=document.getElementById("prev");'
+        'if(a)location=a.href}'
+        'if(e.key==="ArrowRight"){const a=document.getElementById("next");'
+        'if(a)location=a.href}});'
         '})();</script>')
 
 STYLE = (
