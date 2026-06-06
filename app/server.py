@@ -305,13 +305,25 @@ STYLE = (
     '#dropov.on{visibility:visible}'
 )
 
-# Usuwanie plików — 🗑 przy pliku: confirm → HTTP DELETE → plik ląduje
-# w ROOT/.kosz/ (timestamp_nazwa), wiersz znika od razu.
+# Akcje plikowe: 🗑 usuń (→.kosz), ✎ zmień nazwę (prompt → POST ?rename=),
+# ⧉ kopiuj nazwę do schowka.
 DEL_JS = (
     '<script>document.addEventListener("click",async e=>{'
-    'const a=e.target.closest("a.del");if(!a)return;'
+    'const a=e.target.closest("a.del,a.ren,a.cpy");if(!a)return;'
     'e.preventDefault();'
     'const n=decodeURIComponent(a.dataset.n);'
+    'if(a.classList.contains("cpy")){'
+    'try{await navigator.clipboard.writeText(n);'
+    'a.textContent="✓";setTimeout(()=>a.textContent="⧉",900);}'
+    'catch(err){prompt("Skopiuj nazwę:",n);}return;}'
+    'if(a.classList.contains("ren")){'
+    'const nn=prompt("Nowa nazwa:",n);'
+    'if(!nn||nn===n)return;'
+    'try{const r=await fetch(a.dataset.n+"?rename="+encodeURIComponent(nn),'
+    '{method:"POST"});'
+    'if(r.ok){location.reload();}'
+    'else{alert("Błąd zmiany nazwy: "+await r.text());}'
+    '}catch(err){alert("Błąd zmiany nazwy");}return;}'
     'if(!confirm("Usunąć \\""+n+"\\"?\\n(plik trafi do kosza .kosz)"))return;'
     'try{const r=await fetch(a.dataset.n,{method:"DELETE"});'
     'if(r.ok){a.closest("tr").remove();}'
@@ -556,6 +568,8 @@ async def serve(request):
                     rows.append(
                         f'<tr><td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
                         f'<a href="#" class="dl del" data-n="{q}" title="Usuń (do .kosz)">🗑</a>'
+                        f'<a href="#" class="dl ren" data-n="{q}" title="Zmień nazwę">✎</a>'
+                        f'<a href="#" class="dl cpy" data-n="{q}" title="Kopiuj nazwę">⧉</a>'
                         f'<a href="{href}">{icon} {item.name}</a></td>'
                         f'<td data-sort="{s}">{_fmt_size(s)}</td>'
                         f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
@@ -611,7 +625,31 @@ async def delete_item(request):
     return web.json_response({'deleted': raw, 'kosz': dest.name})
 
 
+async def rename_item(request):
+    """POST ?rename=<nowa-nazwa> na pliku/katalogu = zmiana nazwy (ten sam
+    katalog, bez nadpisywania — 409 gdy cel istnieje)."""
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return web.Response(status=400)
+    if ROOT not in target.parents:
+        return web.Response(status=403)
+    if not target.exists():
+        return web.Response(status=404)
+    new_name = Path(request.query.get('rename', '')).name.strip()
+    if not new_name or new_name.startswith('.'):
+        return web.Response(status=400, text='Nieprawidłowa nazwa')
+    dest = target.parent / new_name
+    if dest.exists():
+        return web.Response(status=409, text='Plik o tej nazwie już istnieje')
+    target.rename(dest)
+    return web.json_response({'renamed': target.name, 'to': new_name})
+
+
 async def upload(request):
+    if 'rename' in request.query:
+        return await rename_item(request)
     """POST multipart na katalog = wgranie plików (drag&drop z przeglądarki).
     Duplikaty nazw dostają sufiks z timestampem (jak w bocie) — nic nie nadpisujemy."""
     raw = request.match_info.get('path', '').strip('/')
