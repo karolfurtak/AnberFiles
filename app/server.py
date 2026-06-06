@@ -313,11 +313,15 @@ DEL_JS = (
     'e.preventDefault();'
     'const n=decodeURIComponent(a.dataset.n);'
     'if(a.classList.contains("lek")){'
-    'if(!confirm("Wygenerować lektora dla \\""+n+"\\"?\\n'
-    'Audio powstanie obok pliku (generacja dłuższych dokumentów '
-    'może potrwać kilkanaście minut)."))return;'
+    'let fm=prompt("Lektor dla \\""+n+"\\" — format docelowy:\\n'
+    'mp3 / flac / wav   (puste = wg ustawień lektora)\\n\\n'
+    'Generacja dłuższych dokumentów może potrwać kilkanaście minut.","");'
+    'if(fm===null)return;'
+    'fm=fm.trim().toLowerCase();'
+    'if(fm&&!["mp3","flac","wav"].includes(fm)){alert("Nieznany format: "+fm);return;}'
     'a.textContent="⏳";'
-    'try{const r=await fetch(a.dataset.n+"?lektor=1",{method:"POST"});'
+    'try{const r=await fetch(a.dataset.n+"?lektor=1"+(fm?"&fmt="+fm:""),'
+    '{method:"POST"});'
     'const j=await r.json().catch(()=>({}));'
     'if(r.status===202){a.title="Generuję: "+(j.out||"");'
     'setTimeout(()=>a.textContent="🔊",2500);}'
@@ -704,7 +708,9 @@ async def lektor_item(request):
             except Exception as e:
                 return web.Response(status=500, text=f'Ekstrakcja DOCX: {e}')
 
-    fmt = _lektor_fmt()
+    fmt = request.query.get('fmt', '').lower() or _lektor_fmt()
+    if fmt not in ('mp3', 'wav', 'flac'):
+        fmt = 'mp3'
     out = target.parent / f'{target.stem}_lektor.{fmt}'
     if str(out) in _LEKTOR_JOBS:
         return web.json_response({'status': 'już generuję', 'out': out.name})
@@ -714,6 +720,7 @@ async def lektor_item(request):
         try:
             proc = await asyncio.create_subprocess_exec(
                 'python3', CZYTAJ_TTS, str(src), '-o', str(out),
+                '--format', fmt,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await proc.wait()
