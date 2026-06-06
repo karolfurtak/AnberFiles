@@ -12,11 +12,17 @@ Kliknięcie nagłówka kolumny sortuje (rozmiar i daty sortowane numerycznie).
 """
 import os
 import re
+import html as _html
 import base64
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 from aiohttp import web
+
+try:
+    import markdown as _markdown      # renderowany podgląd .md (opcjonalny)
+except Exception:
+    _markdown = None
 
 
 def _natkey(s: str):
@@ -34,6 +40,70 @@ ICONS = {'pdf': '📕', 'html': '🌐', 'md': '📝', 'jpg': '🖼', 'jpeg': '�
          'docx': '📘', 'doc': '📘', 'svg': '🖼', 'json': '🔧'}
 
 IMG_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+
+MD_STYLE = (
+    'body{margin:0;background:#f7f7f9;color:#222;font-family:system-ui,sans-serif}'
+    '.bar{position:sticky;top:0;display:flex;gap:.6em;align-items:center;'
+    'padding:.5em 1em;background:#26292f;color:#ddd;flex-wrap:wrap;z-index:10}'
+    '.bar a,.bar button{color:#7ab7ff;background:none;border:1px solid #3a3f47;'
+    'border-radius:5px;padding:.25em .7em;text-decoration:none;cursor:pointer;'
+    'font:inherit;font-size:.95em}'
+    '.bar a:hover,.bar button:hover{background:#32363d}'
+    '.bar .name{color:#eee;font-weight:600;word-break:break-all}'
+    '.bar button.on{background:#1a5fb4;border-color:#1a5fb4;color:#fff}'
+    '#rendered{max-width:900px;margin:0 auto;padding:1.5em 2em;background:#fff;'
+    'min-height:92vh;box-shadow:0 0 12px rgba(0,0,0,.07)}'
+    '#rendered img{max-width:100%}'
+    '#rendered table{border-collapse:collapse;margin:.8em 0}'
+    '#rendered th,#rendered td{border:1px solid #999;padding:.35em .6em}'
+    '#rendered code{background:#eef1f6;padding:0 .25em;border-radius:3px}'
+    '#rendered pre{background:#1b1d21;color:#e8e8e8;padding:1em;border-radius:6px;'
+    'overflow-x:auto}'
+    '#rendered pre code{background:none}'
+    '#rendered blockquote{border-left:4px solid #bcd;margin-left:0;'
+    'padding-left:1em;color:#555}'
+    '#raw{display:none;max-width:1100px;margin:0 auto;padding:1em}'
+    '#raw pre{background:#1b1d21;color:#d8e0ea;padding:1.2em;border-radius:8px;'
+    'overflow-x:auto;font-size:.9em;line-height:1.45;white-space:pre-wrap;'
+    "font-family:'Cascadia Mono',Consolas,monospace}"
+)
+
+
+def render_md_page(target: Path) -> str:
+    """Podgląd .md: zakładki Render (markdown+MathJax) / Kod (surowe źródło).
+    Względne ścieżki obrazków działają — strona żyje w katalogu pliku."""
+    src = target.read_text(encoding='utf-8', errors='replace')
+    if _markdown is not None:
+        body = _markdown.markdown(
+            src, extensions=['tables', 'fenced_code', 'nl2br', 'sane_lists'])
+    else:
+        body = '<p><i>(brak biblioteki python-markdown — dostępny tylko Kod)</i></p>'
+    raw = _html.escape(src)
+    q = quote(target.name)
+    return (
+        '<!doctype html><meta charset=utf-8>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{target.name}</title><style>{MD_STYLE}</style>'
+        '<script>window.MathJax={tex:{inlineMath:[["$","$"]],'
+        'displayMath:[["$$","$$"]]}};</script>'
+        '<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/'
+        'tex-mml-chtml.js"></script>'
+        f'<div class="bar"><a href="./">📁 folder</a>'
+        f'<button id="bren" class="on">Render</button>'
+        f'<button id="braw">Kod</button>'
+        f'<span class="name">{target.name}</span>'
+        f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
+        f'<div id="rendered">{body}</div>'
+        f'<div id="raw"><pre>{raw}</pre></div>'
+        '<script>(function(){'
+        'const r=document.getElementById("rendered"),'
+        'w=document.getElementById("raw"),'
+        'br=document.getElementById("bren"),bw=document.getElementById("braw");'
+        'function show(ren){r.style.display=ren?"block":"none";'
+        'w.style.display=ren?"none":"block";'
+        'br.classList.toggle("on",ren);bw.classList.toggle("on",!ren);}'
+        'br.onclick=()=>show(true);bw.onclick=()=>show(false);'
+        '})();</script>')
 
 STYLE = (
     'body{font-family:system-ui,sans-serif;max-width:1000px;margin:1.2em auto;'
@@ -297,7 +367,8 @@ async def serve(request):
                     icon = ICONS.get(item.suffix.lower().lstrip('.'), '📄')
                     q = quote(item.name)
                     # zdjęcia → przeglądarka z nawigacją; reszta → plik wprost
-                    href = f'{q}?view=1' if item.suffix.lower() in IMG_EXT else q
+                    ext = item.suffix.lower()
+                    href = f'{q}?view=1' if (ext in IMG_EXT or ext == '.md') else q
                     rows.append(
                         f'<tr><td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
                         f'<a href="{href}">{icon} {item.name}</a></td>'
@@ -368,6 +439,9 @@ async def _serve_file(request, target):
         return web.FileResponse(target, headers={
             'Cache-Control': 'no-cache',
             'Content-Disposition': f"attachment; filename*=UTF-8''{quote(target.name)}"})
+
+    if 'view' in request.query and target.suffix.lower() == '.md':
+        return web.Response(text=render_md_page(target), content_type='text/html')
 
     if 'view' in request.query and target.suffix.lower() in IMG_EXT:
         siblings = sorted(
