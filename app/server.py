@@ -611,7 +611,7 @@ async def serve(request):
                         '<td data-sort="-2">—</td><td data-sort="0"></td>'
                         '<td data-sort="0"></td></tr>')
         for item in items:
-            if item.name.endswith('.meta.json') or item.name.startswith('.'):
+            if item.name.endswith(('.meta.json', '.resume.json')) or item.name.startswith('.'):
                 continue
             try:
                 st = item.stat()
@@ -706,6 +706,44 @@ _LEKTOR_QUEUE: list = []   # rejestr zadań: id/out/src/fmt/state/cancelled/proc
 _LEKTOR_PAUSED = False     # pauza całej kolejki (⏸ w widoku kolejki)
 
 
+LEKTOR_QFILE = Path('/mnt/data/lektor_queue.json')
+
+
+def _lektor_save_queue():
+    """Trwałość kolejki: przeżywa restart serwera i REBOOT konsoli
+    (na starcie zadania wracają; czytaj_tts wznawia z checkpointu chunków)."""
+    import json
+    try:
+        LEKTOR_QFILE.write_text(json.dumps({
+            'paused': _LEKTOR_PAUSED,
+            'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt']}
+                     for j in _LEKTOR_QUEUE if not j['cancelled']]},
+            ensure_ascii=False))
+    except Exception:
+        pass
+
+
+async def _lektor_restore(app):
+    """on_startup: odtwórz kolejkę z dysku. Zadanie, które właśnie generuje
+    osierocony proces (KillMode=process), pomijamy — dokończy się samo."""
+    import json
+    global _LEKTOR_PAUSED
+    try:
+        data = json.loads(LEKTOR_QFILE.read_text())
+    except Exception:
+        return
+    _LEKTOR_PAUSED = bool(data.get('paused'))
+    prog = _lektor_progress()
+    busy_stem = Path(prog['out']).stem if prog else None
+    for it in data.get('jobs', []):
+        if not Path(it['src']).exists():
+            continue
+        if busy_stem and Path(it['out']).stem == busy_stem \
+                and _ext_lektor_running():
+            continue   # już generowane przez osierocony/zewnętrzny proces
+        _lektor_new_job(it['src'], Path(it['out']), it['fmt'])
+
+
 def _lektor_new_job(src, out, fmt) -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
     do następnego" przy pauzie)."""
@@ -718,6 +756,7 @@ def _lektor_new_job(src, out, fmt) -> dict:
            'state': 'queued', 'cancelled': False, 'proc': None,
            'started': _t.time()}
     _LEKTOR_QUEUE.append(job)
+    _lektor_save_queue()
     asyncio.ensure_future(_lektor_run(job))
     return job
 
@@ -758,6 +797,7 @@ async def _lektor_run(job: dict):
             _LEKTOR_QUEUE.remove(job)
         except ValueError:
             pass
+        _lektor_save_queue()
 
 
 def _ext_lektor_pids() -> set:
@@ -1061,6 +1101,7 @@ async def lektor_pause(request):
             except ProcessLookupError:
                 pass
         _LEKTOR_PAUSED = True
+        _lektor_save_queue()
         return web.json_response({'paused': 'ext'})
     try:
         jid = int(rid)
@@ -1087,6 +1128,7 @@ async def lektor_pause(request):
         except ProcessLookupError:
             pass
     _LEKTOR_PAUSED = True
+    _lektor_save_queue()
     return web.json_response({'paused': jid})
 
 
@@ -1096,6 +1138,7 @@ async def lektor_resume(request):
     import os
     import signal as _sig
     _LEKTOR_PAUSED = False
+    _lektor_save_queue()
     for j in _LEKTOR_QUEUE:
         if j['state'] == 'paused' and j.get('proc') is not None:
             try:
@@ -1261,6 +1304,7 @@ async def _serve_file(request, target):
 def main():
     # client_max_size: limit żądania POST (upload) — domyślny 1 MB to za mało
     app = web.Application(middlewares=[auth], client_max_size=512 * 1024 ** 2)
+    app.on_startup.append(_lektor_restore)
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)
     app.router.add_delete('/{path:.*}', delete_item)
