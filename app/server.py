@@ -763,6 +763,7 @@ def _lektor_new_job(src, out, fmt) -> dict:
 
 async def _lektor_run(job: dict):
     out = Path(job['out'])
+    shutdown = False
     try:
         async with _LEKTOR_LOCK:
             if job['cancelled']:
@@ -792,12 +793,18 @@ async def _lektor_run(job: dict):
                             p.unlink()
                     except FileNotFoundError:
                         pass
+    except asyncio.CancelledError:
+        # shutdown/restart serwera — zadanie ma PRZETRWAĆ w pliku kolejki
+        # (restore odtworzy je na starcie); nie nadpisujemy rejestru
+        shutdown = True
+        raise
     finally:
         try:
             _LEKTOR_QUEUE.remove(job)
         except ValueError:
             pass
-        _lektor_save_queue()
+        if not shutdown:
+            _lektor_save_queue()
 
 
 def _ext_lektor_pids() -> set:
