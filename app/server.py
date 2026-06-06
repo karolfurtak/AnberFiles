@@ -42,6 +42,71 @@ ICONS = {'pdf': '📕', 'html': '🌐', 'md': '📝', 'jpg': '🖼', 'jpeg': '�
          'docx': '📘', 'doc': '📘', 'svg': '🖼', 'json': '🔧'}
 
 IMG_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+AUDIO_EXT = {'.mp3', '.flac', '.wav', '.ogg', '.m4a', '.opus'}
+AUDIO_MIME = {'.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.wav': 'audio/wav',
+              '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.opus': 'audio/opus'}
+
+AUDIO_STYLE = (
+    'body{margin:0;background:#14161c;color:#cfd6df;font-family:system-ui,sans-serif;'
+    'display:flex;flex-direction:column;min-height:100vh}'
+    '.bar{display:flex;gap:.6em;align-items:center;padding:.55em 1em;'
+    'background:#1d2027;flex-wrap:wrap}'
+    '.bar a,.bar button{color:#7ab7ff;background:none;border:1px solid #343a45;'
+    'border-radius:5px;padding:.25em .7em;text-decoration:none;cursor:pointer;'
+    'font:inherit;font-size:.95em}'
+    '.bar a:hover,.bar button:hover{background:#272b34}'
+    '.bar button.on{background:#1a5fb4;border-color:#1a5fb4;color:#fff}'
+    '.wrap{flex:1;display:flex;flex-direction:column;align-items:center;'
+    'justify-content:center;gap:1.2em;padding:1em}'
+    '.tname{font-size:1.15em;color:#eee;word-break:break-all;text-align:center;'
+    'max-width:90%}'
+    'audio{width:min(680px,92vw)}'
+    '.spd{display:flex;gap:.4em;align-items:center;color:#8a93a0;font-size:.9em}'
+)
+
+
+def render_audio_page(target: Path) -> str:
+    """Odtwarzacz audio (?view=1): natywny <audio>, poprzedni/następny
+    w katalogu, regulacja tempa (lektor!), autoodtwarzanie."""
+    sibs = sorted((x.name for x in target.parent.iterdir()
+                   if x.is_file() and x.suffix.lower() in AUDIO_EXT
+                   and not x.name.startswith('.')), key=_natkey)
+    idx = sibs.index(target.name) if target.name in sibs else 0
+    prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
+    nxt = quote(sibs[idx + 1]) + '?view=1' if idx < len(sibs) - 1 else None
+    a_prev = (f'<a href="{prv}" id="prev">← poprzedni</a>' if prv
+              else '<a style="opacity:.3;pointer-events:none">← poprzedni</a>')
+    a_next = (f'<a href="{nxt}" id="next">następny →</a>' if nxt
+              else '<a style="opacity:.3;pointer-events:none">następny →</a>')
+    q = quote(target.name)
+    spd_btns = ''.join(
+        f'<button class="sp" data-s="{s}">{s}×</button>'
+        for s in ('0.75', '1', '1.25', '1.5', '2'))
+    return (
+        '<!doctype html><meta charset=utf-8>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>♪ {target.name}</title><style>{AUDIO_STYLE}</style>'
+        f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
+        f'<span style="color:#8a93a0">{idx + 1} / {len(sibs)}</span>'
+        f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
+        f'<div class="wrap"><div class="tname">🎵 {target.name}</div>'
+        f'<audio id="au" controls autoplay src="{q}"></audio>'
+        f'<div class="spd">tempo: {spd_btns}</div></div>'
+        '<script>(function(){'
+        'const au=document.getElementById("au");'
+        'const sp=[...document.querySelectorAll(".sp")];'
+        'function setr(r){au.playbackRate=parseFloat(r);'
+        'sp.forEach(b=>b.classList.toggle("on",b.dataset.s===r));'
+        'try{localStorage.setItem("audioRate",r)}catch(e){}}'
+        'sp.forEach(b=>b.onclick=()=>setr(b.dataset.s));'
+        'setr(localStorage.getItem("audioRate")||"1");'
+        # koniec utworu → automatycznie następny (playlista po katalogu)
+        'au.onended=()=>{const n=document.getElementById("next");if(n)location=n.href};'
+        'document.addEventListener("keydown",e=>{'
+        'if(e.key==="ArrowLeft"){const a=document.getElementById("prev");if(a)location=a.href}'
+        'if(e.key==="ArrowRight"){const a=document.getElementById("next");if(a)location=a.href}'
+        'if(e.key===" "){e.preventDefault();au.paused?au.play():au.pause()}});'
+        '})();</script>')
 
 DOCX_CACHE = Path('/mnt/data/.cache/docx-preview')
 _LO_LOCK = asyncio.Lock()   # jedna konwersja naraz (A53)
@@ -485,7 +550,8 @@ async def serve(request):
                     # zdjęcia → przeglądarka z nawigacją; reszta → plik wprost
                     ext = item.suffix.lower()
                     href = (f'{q}?view=1'
-                            if (ext in IMG_EXT or ext in ('.md', '.docx', '.doc'))
+                            if (ext in IMG_EXT or ext in AUDIO_EXT
+                                or ext in ('.md', '.docx', '.doc'))
                             else q)
                     rows.append(
                         f'<tr><td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
@@ -584,6 +650,16 @@ async def _serve_file(request, target):
         return web.FileResponse(target, headers={
             'Cache-Control': 'no-cache',
             'Content-Disposition': f"attachment; filename*=UTF-8''{quote(target.name)}"})
+
+    if 'view' in request.query and target.suffix.lower() in AUDIO_EXT:
+        return web.Response(text=render_audio_page(target),
+                            content_type='text/html')
+
+    # audio bez ?view: poprawny MIME (mimetypes nie zna .flac → pobieranie
+    # zamiast odtwarzania w <audio>)
+    if target.suffix.lower() in AUDIO_EXT and 'dl' not in request.query:
+        return web.FileResponse(target, headers={
+            'Content-Type': AUDIO_MIME[target.suffix.lower()]})
 
     if 'view' in request.query and target.suffix.lower() in ('.docx', '.doc'):
         pdf = await docx_to_pdf(target)
