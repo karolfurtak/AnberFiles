@@ -141,6 +141,23 @@ def render_md_page(target: Path) -> str:
         'w.style.display=ren?"none":"block";'
         'br.classList.toggle("on",ren);bw.classList.toggle("on",!ren);}'
         'br.onclick=()=>show(true);bw.onclick=()=>show(false);'
+        # AUTO-ODSWIEZANIE: poll mtime co 3 s; przy zmianie pobierz strone,
+        # podmien tresc obu widokow i przelicz wzory MathJax. Zakladka
+        # i pozycja przewiniecia zostaja.
+        'let _mt=0;'
+        'async function chk(){try{'
+        'const j=await(await fetch(location.pathname+"?mt=1",'
+        '{cache:"no-store"})).json();'
+        'if(_mt&&j.mt!==_mt){'
+        'const doc=new DOMParser().parseFromString('
+        'await(await fetch(location.pathname+"?view=1",'
+        '{cache:"no-store"})).text(),"text/html");'
+        'const nr=doc.getElementById("rendered"),nw=doc.getElementById("raw");'
+        'if(nr)r.innerHTML=nr.innerHTML;'
+        'if(nw)w.innerHTML=nw.innerHTML;'
+        'if(window.MathJax&&MathJax.typesetPromise)MathJax.typesetPromise([r]);}'
+        '_mt=j.mt;}catch(e){}}'
+        'setInterval(chk,3000);chk();'
         'document.addEventListener("keydown",e=>{'
         'if(e.key==="ArrowLeft"){const a=document.getElementById("prev");'
         'if(a)location=a.href}'
@@ -482,6 +499,9 @@ async def _serve_file(request, target):
         return web.FileResponse(target, headers={
             'Cache-Control': 'no-cache',
             'Content-Disposition': f"attachment; filename*=UTF-8''{quote(target.name)}"})
+
+    if 'mt' in request.query and target.suffix.lower() == '.md':
+        return web.json_response({'mt': target.stat().st_mtime})
 
     if 'view' in request.query and target.suffix.lower() == '.md':
         return web.Response(text=render_md_page(target), content_type='text/html')
