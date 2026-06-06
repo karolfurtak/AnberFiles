@@ -701,9 +701,19 @@ def _ext_lektor_pids() -> set:
     r = subprocess.run(['pgrep', '-f', 'czytaj_tts.py'],
                        capture_output=True, text=True)
     pids = {int(x) for x in r.stdout.split()} if r.returncode == 0 else set()
+    # tylko realne interpretery Pythona — pgrep -f łapie też powłoki/wrappery,
+    # których CMDLINE zawiera nazwę skryptu (np. sesję ssh agenta!)
+    real = set()
+    for p in pids:
+        try:
+            comm = Path(f'/proc/{p}/comm').read_text().strip()
+        except OSError:
+            continue
+        if comm.startswith('python'):
+            real.add(p)
     ours = {j['proc'].pid for j in _LEKTOR_QUEUE
             if j.get('proc') is not None and j['proc'].returncode is None}
-    return pids - ours
+    return real - ours
 
 
 def _ext_lektor_running() -> bool:
