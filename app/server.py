@@ -17,6 +17,8 @@ import base64
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
+import asyncio
+import hashlib
 from aiohttp import web
 
 try:
@@ -40,6 +42,44 @@ ICONS = {'pdf': '📕', 'html': '🌐', 'md': '📝', 'jpg': '🖼', 'jpeg': '�
          'docx': '📘', 'doc': '📘', 'svg': '🖼', 'json': '🔧'}
 
 IMG_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+
+DOCX_CACHE = Path('/mnt/data/.cache/docx-preview')
+_LO_LOCK = asyncio.Lock()   # jedna konwersja naraz (A53)
+
+
+async def docx_to_pdf(target: Path) -> Path | None:
+    """Podglad .docx: konwersja LibreOffice -> PDF, cache per (sciezka, mtime).
+    Pierwsze otwarcie ~8-12 s, kolejne natychmiast."""
+    DOCX_CACHE.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(str(target).encode()).hexdigest()[:16]
+    cached = DOCX_CACHE / f'{key}_{int(target.stat().st_mtime)}.pdf'
+    if cached.exists():
+        return cached
+    # sprzatnij stare wersje tego pliku
+    for old_f in DOCX_CACHE.glob(f'{key}_*.pdf'):
+        try:
+            old_f.unlink()
+        except Exception:
+            pass
+    async with _LO_LOCK:
+        if cached.exists():
+            return cached
+        proc = await asyncio.create_subprocess_exec(
+            'soffice', '--headless',
+            '-env:UserInstallation=file:///tmp/lo_preview_profile',
+            '--convert-to', 'pdf', '--outdir', str(DOCX_CACHE), str(target),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=90)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return None
+    produced = DOCX_CACHE / (target.stem + '.pdf')
+    if produced.exists():
+        produced.rename(cached)
+        return cached
+    return None
+
 
 MD_STYLE = (
     'body{margin:0;background:#f7f7f9;color:#222;font-family:system-ui,sans-serif}'
@@ -428,7 +468,9 @@ async def serve(request):
                     q = quote(item.name)
                     # zdjęcia → przeglądarka z nawigacją; reszta → plik wprost
                     ext = item.suffix.lower()
-                    href = f'{q}?view=1' if (ext in IMG_EXT or ext == '.md') else q
+                    href = (f'{q}?view=1'
+                            if (ext in IMG_EXT or ext in ('.md', '.docx', '.doc'))
+                            else q)
                     rows.append(
                         f'<tr><td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
                         f'<a href="{href}">{icon} {item.name}</a></td>'
@@ -499,6 +541,15 @@ async def _serve_file(request, target):
         return web.FileResponse(target, headers={
             'Cache-Control': 'no-cache',
             'Content-Disposition': f"attachment; filename*=UTF-8''{quote(target.name)}"})
+
+    if 'view' in request.query and target.suffix.lower() in ('.docx', '.doc'):
+        pdf = await docx_to_pdf(target)
+        if pdf is None:
+            return web.Response(status=500, text='Konwersja DOCX nie powiodla sie')
+        return web.FileResponse(pdf, headers={
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': f"inline; filename*=UTF-8''{quote(target.stem)}.pdf",
+            'Cache-Control': 'no-cache'})
 
     if 'mt' in request.query and target.suffix.lower() == '.md':
         return web.json_response({'mt': target.stat().st_mtime})
