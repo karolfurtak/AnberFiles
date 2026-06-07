@@ -1044,7 +1044,14 @@ LEKTORQ_PAGE = (
     'if(to==="1"&&!confirm("Konsola WYŁĄCZY SIĘ automatycznie po '
     'ukończeniu wszystkich pozycji kolejki (1 min na anulowanie). '
     'Włączyć?"))return;'
-    'await fetch("/?lektorqshutdown="+to,{method:"POST"});load();return;}'
+    'let r=await fetch("/?lektorqshutdown="+to,{method:"POST"});'
+    'let j=await r.json().catch(()=>({}));'
+    'if(j.status==="empty-queue"){'
+    'if(confirm("UWAGA: kolejka jest PUSTA — konsola wyłączy się '
+    'JUŻ ZA MINUTĘ, nie po przyszłych zadaniach.\\n\\n'
+    'Na pewno wyłączyć konsolę teraz?"))'
+    'await fetch("/?lektorqshutdown=1&force=1",{method:"POST"});}'
+    'load();return;}'
     'const r=e.target.closest("a#res");'
     'if(r){e.preventDefault();'
     'await fetch("/?lektorqresume=1",{method:"POST"});load();return;}'
@@ -1338,6 +1345,12 @@ async def lektor_shutdown_toggle(request):
     global _LEKTOR_SHUTDOWN
     import subprocess
     val = request.query.get('lektorqshutdown', '0') == '1'
+    # PUSTA kolejka + włączenie = natychmiastowe wyłączenie konsoli —
+    # wymagaj jawnego force (incydent 2026-06-07 11:15: konsola zgasła
+    # w trakcie odtwarzania muzyki)
+    if val and not _LEKTOR_QUEUE and not _ext_lektor_running() \
+            and 'force' not in request.query:
+        return web.json_response({'status': 'empty-queue'})
     _LEKTOR_SHUTDOWN = val
     _lektor_save_queue()
     if not val:
