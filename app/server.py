@@ -356,14 +356,18 @@ DEL_JS = (
     '["mp3","MP3 — 96 kbps (najmniejszy plik)"],'
     '["flac","FLAC — bezstratny zapis źródła 96 kbps"],'
     '["wav","WAV — nieskompresowany PCM"]];'
-    'let radios="";'
-    'for(const [v,l] of opts){radios+=\'<label style="display:flex;'
+    'const dopts=[["","⚙ wg ustawień lektora"],'
+    '["tak","TAK — model wizyjny opisze każdą ilustrację (dłużej)"],'
+    '["nie","NIE — czytaj tylko podpisy rysunków"]];'
+    'function mkradios(arr,nm){let h="";'
+    'for(const [v,l] of arr){h+=\'<label style="display:flex;'
     'align-items:center;gap:.55em;padding:.45em .3em;cursor:pointer;'
     'border-radius:6px" onmouseover="this.style.background=\\\'#eef2f7\\\'" '
     'onmouseout="this.style.background=\\\'\\\'">'
-    '<input type="radio" name="lfmt" value="\'+v+\'"\'+(v===""?" checked":"")'
+    '<input type="radio" name="\'+nm+\'" value="\'+v+\'"\'+(v===""?" checked":"")'
     '+\' style="accent-color:#1a5fb4;width:1.05em;height:1.05em">\'+l'
-    '+\'</label>\';}'
+    '+\'</label>\';}return h;}'
+    'const radios=mkradios(opts,"lfmt"),dradios=mkradios(dopts,"lopis");'
     'ov.innerHTML=\'<div style="background:#fff;border-radius:10px;'
     'padding:1.1em 1.4em;max-width:92vw;min-width:300px;'
     'box-shadow:0 8px 30px rgba(0,0,0,.35)">'
@@ -372,6 +376,9 @@ DEL_JS = (
     '<div style="color:#556;font-size:.9em;margin-bottom:.7em">'
     'Format nagrania (generacja dłuższych dokumentów może potrwać '
     'kilkanaście minut):</div>\'+radios+'
+    '\'<div style="color:#556;font-size:.9em;margin:.8em 0 .3em;'
+    'border-top:1px solid #e4e8ee;padding-top:.7em">'
+    '🖼 Opisy ilustracji (model wizyjny):</div>\'+dradios+'
     '\'<div style="display:flex;gap:.6em;margin-top:1em;'
     'justify-content:flex-end">'
     '<button data-a="x">Anuluj</button>'
@@ -382,7 +389,9 @@ DEL_JS = (
     'border-radius:6px;cursor:pointer;font-size:1em"'
     '+(b.dataset.a==="x"?";background:#f2f5f9":"");'
     'b.onclick=()=>{const v=ov.querySelector("input[name=lfmt]:checked");'
-    'ov.remove();res(b.dataset.a==="ok"?(v?v.value:""):null);};});'
+    'const d=ov.querySelector("input[name=lopis]:checked");'
+    'ov.remove();res(b.dataset.a==="ok"'
+    '?{fmt:(v?v.value:""),opisy:(d?d.value:"")}:null);};});'
     'ov.onclick=e=>{if(e.target===ov){ov.remove();res(null);}};'
     'document.body.appendChild(ov);});}'
     'document.addEventListener("click",async e=>{'
@@ -394,7 +403,8 @@ DEL_JS = (
     'if(fm===null)return;'
     'a.textContent="⏳";'
     'try{'
-    'let u=a.dataset.n+"?lektor=1"+(fm?"&fmt="+fm:"");'
+    'let u=a.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
+    '+(fm.opisy?"&opisy="+fm.opisy:"");'
     'let r=await fetch(u,{method:"POST"});'
     'let j=await r.json().catch(()=>({}));'
     'if(j.status==="busy"){'
@@ -757,7 +767,8 @@ def _lektor_save_queue():
         LEKTOR_QFILE.write_text(json.dumps({
             'paused': _LEKTOR_PAUSED,
             'shutdown': _LEKTOR_SHUTDOWN,
-            'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt']}
+            'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt'],
+                      'opisy': j.get('opisy', '')}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
             ensure_ascii=False))
     except Exception:
@@ -784,10 +795,11 @@ async def _lektor_restore(app):
         if busy_stem and Path(it['out']).stem == busy_stem \
                 and _ext_lektor_running():
             continue   # już generowane przez osierocony/zewnętrzny proces
-        _lektor_new_job(it['src'], Path(it['out']), it['fmt'])
+        _lektor_new_job(it['src'], Path(it['out']), it['fmt'],
+                        it.get('opisy', ''))
 
 
-def _lektor_new_job(src, out, fmt) -> dict:
+def _lektor_new_job(src, out, fmt, opisy='') -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
     do następnego" przy pauzie)."""
     global _LEKTOR_SEQ, _LEKTOR_LOCK
@@ -796,8 +808,8 @@ def _lektor_new_job(src, out, fmt) -> dict:
     _LEKTOR_SEQ += 1
     import time as _t
     job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
-           'state': 'queued', 'cancelled': False, 'proc': None,
-           'started': _t.time()}
+           'opisy': opisy, 'state': 'queued', 'cancelled': False,
+           'proc': None, 'started': _t.time()}
     _LEKTOR_QUEUE.append(job)
     _lektor_save_queue()
     asyncio.ensure_future(_lektor_run(job))
@@ -823,9 +835,12 @@ async def _lektor_run(job: dict):
             # zadanie znikało z kolejki bez śladu i bez pliku)
             errlog = open('/mnt/data/lektor_errors.log', 'ab')
             errlog.write(f'\n=== {Path(job["out"]).name} ===\n'.encode())
+            cmd = ['python3', CZYTAJ_TTS, job['src'], '-o', job['out'],
+                   '--format', job['fmt']]
+            if job.get('opisy') in ('tak', 'nie'):
+                cmd += ['--opisy', job['opisy']]
             proc = await asyncio.create_subprocess_exec(
-                'python3', CZYTAJ_TTS, job['src'], '-o', job['out'],
-                '--format', job['fmt'],
+                *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=errlog)
             job['proc'] = proc
@@ -1202,7 +1217,10 @@ async def lektor_item(request):
             {'status': 'busy', 'pending': len(_LEKTOR_QUEUE)})
 
     queued = bool(_LEKTOR_QUEUE) or _ext_lektor_running() or _LEKTOR_PAUSED
-    _lektor_new_job(src, out, fmt)
+    opisy = request.query.get('opisy', '')
+    if opisy not in ('tak', 'nie'):
+        opisy = ''
+    _lektor_new_job(src, out, fmt, opisy)
     return web.json_response(
         {'status': 'queued' if queued else 'start',
          'out': out.name, 'position': len(_LEKTOR_QUEUE)}, status=202)
@@ -1265,7 +1283,8 @@ async def lektor_pause(request):
                 job['proc'].kill()
             except ProcessLookupError:
                 pass
-        nj = _lektor_new_job(job['src'], Path(job['out']), job['fmt'])
+        nj = _lektor_new_job(job['src'], Path(job['out']), job['fmt'],
+                             job.get('opisy', ''))
         return web.json_response({'skipped': jid, 'requeued_as': nj['id']})
     # hold
     if job.get('proc') is not None and job['state'] == 'running':

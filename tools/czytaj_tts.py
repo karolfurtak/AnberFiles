@@ -90,7 +90,8 @@ SYMBOLS = {'≈': ' około ', '≤': ' mniejsze lub równe ', '≥': ' większe 
            '–': ' ', '—': ' . ', '·': ' razy ', '½': 'jedna druga',
            '…': '.', '„': '', '“': '', '”': '', '"': '', '»': '', '«': ''}
 
-ABBR = {'np.': 'na przykład', 'tzn.': 'to znaczy', 'tzw.': 'tak zwany',
+ABBR = {'PM': 'pe em',
+        'np.': 'na przykład', 'tzn.': 'to znaczy', 'tzw.': 'tak zwany',
         'itd.': 'i tak dalej', 'itp.': 'i tym podobne', 'm.in.': 'między innymi',
         'wg': 'według', 'ok.': 'około', 'nr': 'numer', 'tab.': 'tabela',
         'rys.': 'rysunek', 'str.': 'strona', 'pkt': 'punkt',
@@ -110,14 +111,27 @@ def _plural(n: float, forms: tuple) -> str:
     return forms[2]
 
 
+_FRAC_DEN = {1: ('dziesiąta', 'dziesiąte', 'dziesiątych'),
+             2: ('setna', 'setne', 'setnych'),
+             3: ('tysięczna', 'tysięczne', 'tysięcznych')}
+_FEM = {1: 'jedna', 2: 'dwie'}
+
+
 def _num_pl(raw: str) -> tuple:
-    """'6,69' / '715' → (tekst słownie, wartość float)."""
+    """'6,69' / '715' → (tekst słownie, wartość float).
+    Ułamki <1 czytane naturalnie: 0,5 → "pięć dziesiątych",
+    0,67 → "sześćdziesiąt siedem setnych" (poprawka z #e-lektor-ustawienia)."""
     val = float(raw.replace(',', '.').replace(' ', ''))
     if val == int(val):
         return num2words(int(val), lang='pl'), val
     całk, ułam = raw.replace('.', ',').split(',')
+    licznik = int(ułam)
+    if int(całk) == 0 and len(ułam) in _FRAC_DEN:
+        formy = _FRAC_DEN[len(ułam)]
+        lic = _FEM.get(licznik, num2words(licznik, lang='pl'))
+        return f'{lic} {_plural(licznik, formy)}', val
     c = num2words(int(całk), lang='pl')
-    u = num2words(int(ułam), lang='pl')
+    u = num2words(licznik, lang='pl')
     return f'{c} przecinek {u}', val
 
 
@@ -237,6 +251,98 @@ def split_lang(text: str) -> list:
         pos = m.end()
     segs.append(('pl', text[pos:]))
     return [(lg, t) for lg, t in segs if t.strip()]
+
+
+# ── OPISY ILUSTRACJI (model wizyjny; klucze z #e-lektor-ustawienia) ──────────
+_DLUGOSC = {'krotki': '2-3 zdaniami', 'sredni': '4-6 zdaniami',
+            'szczegolowy': '7-10 zdaniami'}
+_STYL = {
+    'ekspercki': ('jako specjalista tej dziedziny — używaj właściwej '
+                  'terminologii i jednostek SI'),
+    'popularny': 'prostym językiem, zrozumiale dla laika, bez żargonu',
+}
+
+
+def _opisz_obraz(img: Path, kontekst: str, cfg: dict) -> str:
+    """Opis obrazu przez model wizyjny (Claude CLI — ta sama instalacja,
+    z której korzysta agent). Cache w exports/.opisy_cache/<sha1>.txt."""
+    import hashlib
+    import os
+    import subprocess
+    cache = img.parent.parent / 'exports' / '.opisy_cache'
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        cache = Path('/tmp/opisy_cache')
+        cache.mkdir(exist_ok=True)
+    h = hashlib.sha1(img.read_bytes()).hexdigest()[:16]
+    cf = cache / f'{h}.txt'
+    if cf.exists():
+        return cf.read_text(encoding='utf-8').strip()
+    dl = _DLUGOSC.get(cfg.get('dlugosc_opisu', 'sredni'), _DLUGOSC['sredni'])
+    st = _STYL.get(cfg.get('styl_opisu', 'ekspercki'), _STYL['ekspercki'])
+    prompt = (f'Obejrzyj plik graficzny {img} i opisz jego treść {dl}, {st}. '
+              f'Kontekst dokumentu: {kontekst}. Opis będzie CZYTANY przez '
+              f'lektora osobie, która obrazu nie widzi — opisuj co widać '
+              f'(elementy, relacje, wartości), bez zwrotów typu „na obrazku". '
+              f'Zwróć WYŁĄCZNIE tekst opisu po polsku, bez nagłówków i uwag.')
+    env = dict(os.environ, HOME='/root', IS_SANDBOX='1',
+               PATH='/root/.local/bin:/usr/local/bin:/usr/bin:/bin')
+    try:
+        r = subprocess.run(
+            ['claude', '--dangerously-skip-permissions', '-p', prompt],
+            capture_output=True, text=True, timeout=240, env=env,
+            cwd=str(img.parent))
+        desc = (r.stdout or '').strip()
+    except Exception as e:
+        print(f'  opis {img.name}: BŁĄD {e}', flush=True)
+        return ''
+    if desc and len(desc) > 40:
+        cf.write_text(desc, encoding='utf-8')
+        return desc
+    print(f'  opis {img.name}: pusta odpowiedź modelu', flush=True)
+    return ''
+
+
+def describe_images(raw: str, src: Path, cfg: dict) -> str:
+    """Pre-pass: każdy ![alt](ścieżka) → opis_wstep + opis z modelu
+    wizyjnego (wstawiony do strumienia TTS w miejscu obrazu).
+    Działa tylko gdy opisuj_grafiki = tak."""
+    if cfg.get('opisuj_grafiki', 'nie') != 'tak':
+        return raw
+    tytul = next((ln.lstrip('# ').strip() for ln in raw.splitlines()
+                  if ln.startswith('#')), src.stem)
+    wstep = cfg.get('opis_wstep', 'Opis ilustracji:')
+    if wstep.lower() in ('puste', 'brak', 'nie'):
+        wstep = ''
+
+    def repl(m):
+        alt, ref = m.group(1), m.group(2)
+        name = Path(ref.split('?')[0]).name
+        img = None
+        for c in (src.parent / ref, src.parent / name,
+                  src.parent.parent / 'raw' / name,
+                  src.parent / 'raw' / name):
+            if c.exists():
+                img = c
+                break
+        if img is None:
+            return ' '
+        # nagłówek sekcji najbliższy przed obrazem (kontekst dziedzinowy)
+        sekcja = ''
+        for ln in reversed(raw[:m.start()].splitlines()):
+            if ln.startswith('#'):
+                sekcja = ln.lstrip('# ').strip()
+                break
+        kontekst = (f'sprawozdanie "{tytul}", sekcja "{sekcja}", '
+                    f'podpis "{alt}"')
+        print(f'  opisuję: {img.name}...', flush=True)
+        desc = _opisz_obraz(img, kontekst, cfg)
+        if not desc:
+            return ' '
+        return f' {wstep} {desc} ' if wstep else f' {desc} '
+
+    return re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', repl, raw)
 
 
 def _norm_en(text: str) -> str:
@@ -381,6 +487,9 @@ def main():
     ap.add_argument('--rate', default=None, help='tempo, np. +10%%')
     ap.add_argument('--format', choices=['mp3', 'wav', 'flac'], default=None,
                     help='format wyjścia (domyślnie z conf / rozszerzenia -o)')
+    ap.add_argument('--opisy', choices=['tak', 'nie'], default=None,
+                    help='opisy ilustracji modelem wizyjnym '
+                         '(domyślnie z lektor-ustawienia.conf)')
     ap.add_argument('--dump-text', action='store_true',
                     help='wypisz znormalizowany tekst i zakończ (debug)')
     a = ap.parse_args()
@@ -413,6 +522,11 @@ def main():
         print('Lektor zajęty — czekam na swoją kolej...', flush=True)
         fcntl.flock(_lock_f, fcntl.LOCK_EX)
     raw = src.read_text(encoding='utf-8', errors='replace')
+    # opisy ilustracji (model wizyjny) — PRZED normalizacją, żeby opis
+    # przeszedł przez pełną normalizację liczb/jednostek jak zwykły tekst
+    if a.opisy is not None:
+        cfg['opisuj_grafiki'] = a.opisy
+    raw = describe_images(raw, src, cfg)
     # segmentacja językowa PRZED normalizacją (PL-normalizacja zniszczyłaby
     # nawiasy „(z ang. …)"); EN-segmenty dostają tylko lekkie czyszczenie
     raw_segs = split_lang(raw) if wstawki == 'tak' else [('pl', raw)]
