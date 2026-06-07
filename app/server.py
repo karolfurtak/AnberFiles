@@ -1449,7 +1449,8 @@ async def _serve_file(request, target):
         return web.FileResponse(target, headers={
             'Content-Type': AUDIO_MIME[target.suffix.lower()]})
 
-    if 'view' in request.query and target.suffix.lower() in ('.docx', '.doc'):
+    # surowy PDF z konwersji (źródło dla <embed> w stronie podglądu)
+    if 'pdf' in request.query and target.suffix.lower() in ('.docx', '.doc'):
         pdf = await docx_to_pdf(target)
         if pdf is None:
             return web.Response(status=500, text='Konwersja DOCX nie powiodla sie')
@@ -1458,7 +1459,44 @@ async def _serve_file(request, target):
             'Content-Disposition': f"inline; filename*=UTF-8''{quote(target.stem)}.pdf",
             'Cache-Control': 'no-cache'})
 
-    if 'mt' in request.query and target.suffix.lower() == '.md':
+    if 'view' in request.query and target.suffix.lower() in ('.docx', '.doc'):
+        # strona-opakowanie: PDF w <embed> + poll mtime DOCX co 3 s —
+        # po zmianie pliku (np. re-eksport przez agenta) podgląd sam się
+        # przeładowuje (świeża konwersja, cache-bust parametrem v=)
+        q = quote(target.name)
+        mt = target.stat().st_mtime
+        page = (
+            '<!doctype html><meta charset=utf-8>'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{target.name}</title>'
+            '<style>body{margin:0;height:100vh;display:flex;'
+            'flex-direction:column}'
+            '.bar{display:flex;gap:.6em;align-items:center;padding:.4em .9em;'
+            'background:#26292f;color:#ddd;font-family:system-ui,sans-serif;'
+            'font-size:.9em}'
+            '.bar a{color:#7ab7ff;text-decoration:none;border:1px solid '
+            '#3a3f47;border-radius:5px;padding:.2em .6em}'
+            'embed{flex:1;width:100%;border:0}</style>'
+            f'<div class="bar"><a href="./">📁 folder</a>'
+            f'<span style="word-break:break-all">{target.name}</span>'
+            f'<span id="st" style="color:#8a93a0"></span>'
+            f'<a href="{q}?dl=1" style="margin-left:auto">⬇ DOCX</a></div>'
+            f'<embed id="pv" src="{q}?pdf=1&v={mt}" '
+            'type="application/pdf">'
+            '<script>(function(){'
+            f'let mt={mt};'
+            'async function chk(){try{'
+            f'const j=await(await fetch("{q}?mt=1",'
+            '{cache:"no-store"})).json();'
+            'if(j.mt!==mt){mt=j.mt;'
+            'document.getElementById("st").textContent="odświeżam...";'
+            f'document.getElementById("pv").src="{q}?pdf=1&v="+mt;'
+            'setTimeout(()=>document.getElementById("st").textContent="",4000);}'
+            '}catch(e){}}'
+            'setInterval(chk,3000);})();</script>')
+        return web.Response(text=page, content_type='text/html')
+
+    if 'mt' in request.query:
         return web.json_response({'mt': target.stat().st_mtime})
 
     if 'view' in request.query and target.suffix.lower() == '.md':
