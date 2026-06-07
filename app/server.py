@@ -250,7 +250,8 @@ def render_md_page(target: Path) -> str:
         f'<button id="braw">Kod</button>'
         f'<span class="name">{target.name}</span>'
         f'<span style="color:#888">{idx + 1} / {len(sibs)}</span>'
-        f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
+        f'<a href="{q}?dl=1">⬇ pobierz</a>'
+        f'<a href="#" id="prn" data-n="{q}">🖨 drukuj</a></div>'
         f'<div id="rendered">{body}</div>'
         f'<div id="raw"><pre>{raw}</pre></div>'
         '<script>(function(){'
@@ -261,6 +262,17 @@ def render_md_page(target: Path) -> str:
         'w.style.display=ren?"none":"block";'
         'br.classList.toggle("on",ren);bw.classList.toggle("on",!ren);}'
         'br.onclick=()=>show(true);bw.onclick=()=>show(false);'
+        # druk na Canon G3070 (md→DOCX→PDF→lp na konsoli, ~1-2 min)
+        'document.getElementById("prn").onclick=async e=>{'
+        'e.preventDefault();const a=e.target;'
+        'if(!confirm("Wydrukować na Canon G3070?\\n'
+        '(md→DOCX→PDF jak przy sprawozdaniach; ok. 1–2 min; '
+        'drukarka musi być w sieci domowej)"))return;'
+        'a.textContent="⏳...";'
+        'try{const r=await fetch(a.dataset.n+"?print=1",{method:"POST"});'
+        'a.textContent=r.status===202?"🖨 wysłano":"🖨 błąd";}'
+        'catch(err){a.textContent="🖨 błąd";}'
+        'setTimeout(()=>a.textContent="🖨 drukuj",4000);};'
         # AUTO-ODSWIEZANIE: poll mtime co 3 s; przy zmianie pobierz strone,
         # podmien tresc obu widokow i przelicz wzory MathJax. Zakladka
         # i pozycja przewiniecia zostaja.
@@ -1079,6 +1091,61 @@ def _docx_to_txt(p: Path) -> Path:
     return tmp
 
 
+async def print_item(request):
+    """POST ?print=1 na .md/.docx/.pdf — druk na Canon G3070 (CUPS).
+    .md → export_to_docx → soffice→PDF (paginacja jak w Wordzie) → lp.
+    Async; błędy → /mnt/data/print_errors.log."""
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return web.Response(status=400)
+    if ROOT not in target.parents or not target.is_file():
+        return web.Response(status=403)
+    ext = target.suffix.lower()
+    if ext not in ('.md', '.docx', '.pdf'):
+        return web.Response(status=400, text='Druk: .md/.docx/.pdf')
+
+    async def _run():
+        import time as _t
+        log = open('/mnt/data/print_errors.log', 'ab')
+        log.write(f'\n=== {_t.strftime("%F %T")} {target.name} ===\n'.encode())
+
+        async def sh(*cmd):
+            p = await asyncio.create_subprocess_exec(
+                *cmd, stdout=log, stderr=log)
+            await p.wait()
+            return p.returncode
+
+        try:
+            pdf = target
+            if ext == '.md':
+                tmp_docx = Path('/tmp') / (target.stem + '_print.docx')
+                if await sh('python3',
+                            '/mnt/data/sprawozdania/EXPORT/export_to_docx.py',
+                            str(target), '-o', str(tmp_docx)):
+                    return
+                pdf = Path('/tmp') / (tmp_docx.stem + '.pdf')
+                if await sh('soffice', '--headless',
+                            '-env:UserInstallation=file:///tmp/lo_print',
+                            '--convert-to', 'pdf', '--outdir', '/tmp',
+                            str(tmp_docx)):
+                    return
+            elif ext == '.docx':
+                pdf = Path('/tmp') / (target.stem + '.pdf')
+                if await sh('soffice', '--headless',
+                            '-env:UserInstallation=file:///tmp/lo_print',
+                            '--convert-to', 'pdf', '--outdir', '/tmp',
+                            str(target)):
+                    return
+            await sh('lp', '-d', 'Canon_G3070', str(pdf))
+        finally:
+            log.close()
+
+    asyncio.ensure_future(_run())
+    return web.json_response({'status': 'wysłano do druku'}, status=202)
+
+
 async def lektor_item(request):
     """POST ?lektor=1 na .md/.docx/.txt — generacja audio w TLE
     (czytaj_tts.py). Wynik: <nazwa>_lektor.<fmt> obok pliku (fmt z conf);
@@ -1306,6 +1373,8 @@ async def _lektor_shutdown_watch():
 
 
 async def upload(request):
+    if 'print' in request.query:
+        return await print_item(request)
     if 'lektorqshutdown' in request.query:
         return await lektor_shutdown_toggle(request)
     if 'lektorqpause' in request.query:

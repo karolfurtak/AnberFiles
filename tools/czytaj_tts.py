@@ -448,12 +448,17 @@ def main():
     print(f'OK: {final} ({final.stat().st_size >> 10} KB)')
 
     # kopia do biblioteki muzycznej konsoli (TF-1/Music) — apka Music widzi
-    # lektora obok zwykłej muzyki; wyłączenie: kopiuj_do = nie
+    # lektora obok zwykłej muzyki; wyłączenie: kopiuj_do = nie.
+    # PODZIAŁ TEMATYCZNY: podfolder per projekt (z .../projekty/<nazwa>/...),
+    # widoczny jako folder w playerze konsoli.
     dst_dir = cfg.get('kopiuj_do', '/mnt/mmc/Music/Lektor')
     if dst_dir.lower() not in ('', 'nie', 'off'):
         try:
             import shutil
-            d = Path(dst_dir)
+            parts = final.resolve().parts
+            proj = parts[parts.index('projekty') + 1] \
+                if 'projekty' in parts else 'inne'
+            d = Path(dst_dir) / proj
             d.mkdir(parents=True, exist_ok=True)
             shutil.copy2(final, d / final.name)
             print(f'Kopia w bibliotece Music: {d / final.name}')
