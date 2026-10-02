@@ -566,3 +566,14 @@ def test_klasyfikacja_v1_bez_kolumny_stanu_dziala_jak_dotad(tmp_path, auth):
     dec = uruchom(k, sc)
     assert 'class="sw' not in dec and 'stan nieznany' not in dec
     assert dec.index('MoCap/plan-kamer.md') < dec.index('Rhino/koncepcja.md')
+
+
+def test_czas_trwania_mp3_mpeg2_mono_z_info_jak_z_pipera(tmp_path):
+    """Nagłówek nagrania lektora z Jarvisa (02.10): ID3, ramka FF F3 A0 C0
+    (MPEG-2 warstwa III, 22 050 Hz, mono), Info: 53 908 ramek → 1408,2 s."""
+    import nagrania
+    ramka = (bytes([0xFF, 0xF3, 0xA0, 0xC0]) + bytes(9) + b'Info' + bytes([0, 0, 0, 0x0F])
+             + (53908).to_bytes(4, 'big') + bytes(200))
+    (tmp_path / 'p.mp3').write_bytes(b'ID3\x04\x00\x00\x00\x00\x00\x00' + ramka)
+    assert abs(nagrania.czas_trwania_s(tmp_path / 'p.mp3') - 1408.209) < 0.01
+    assert nagrania.opis_czasu(1408.2) == '23 min 28 s'

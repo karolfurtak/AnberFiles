@@ -59,13 +59,18 @@ def pozostalo_s(audio: Path, wiek_dni: int, teraz: float = None) -> float:
     return Path(audio).stat().st_mtime + wiek_dni * SEKUND_NA_DOBE - teraz
 
 
-_MP3_KBPS = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
-_MP3_HZ = (44100, 48000, 32000, 0)
+# warstwa III: przepływność [kb/s] i częstotliwość [Hz] wg wersji MPEG (bity 4–3
+# drugiego bajtu nagłówka: 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5). Piper przez
+# ffmpeg zapisuje MPEG-2 mono 22 050 Hz z nagłówkiem Info (pomiar 02.10).
+_MP3_KBPS = {3: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0),
+             2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)}
+_MP3_KBPS[0] = _MP3_KBPS[2]
+_MP3_HZ = {3: (44100, 48000, 32000, 0), 2: (22050, 24000, 16000, 0), 0: (11025, 12000, 8000, 0)}
 
 
 def czas_trwania_s(audio: Path):
     """Czas trwania nagrania w sekundach z nagłówka pliku (WAV, FLAC, MP3
-    MPEG-1 warstwa III: Xing/Info albo stała przepływność); None = nie da się
+    MPEG-1/2/2.5 warstwa III: Xing/Info albo stała przepływność); None = nie da się
     ustalić. Czyta najwyżej kilka kB — lista „Do przesłuchania” liczy to przy
     każdym wyświetleniu."""
     audio = Path(audio)
@@ -99,18 +104,24 @@ def czas_trwania_s(audio: Path):
             else:
                 glowa = glowa[:4096]
             i = next((k for k in range(len(glowa) - 3)
-                      if glowa[k] == 0xFF and (glowa[k + 1] & 0xFE) == 0xFA), None)
+                      if glowa[k] == 0xFF and (glowa[k + 1] & 0xE6) == 0xE2
+                      and (glowa[k + 1] >> 3) & 3 != 1), None)
             if i is None:
                 return None
-            kbps = _MP3_KBPS[glowa[i + 2] >> 4]
-            hz = _MP3_HZ[(glowa[i + 2] >> 2) & 3]
+            wersja = (glowa[i + 1] >> 3) & 3
+            kbps = _MP3_KBPS[wersja][glowa[i + 2] >> 4]
+            hz = _MP3_HZ[wersja][(glowa[i + 2] >> 2) & 3]
             if not kbps or not hz:
                 return None
             mono = (glowa[i + 3] >> 6) == 3
-            x = i + 4 + (17 if mono else 32)           # nagłówek Xing/Info
+            if wersja == 3:
+                probek, boczne = 1152, (17 if mono else 32)
+            else:
+                probek, boczne = 576, (9 if mono else 17)
+            x = i + 4 + boczne                         # nagłówek Xing/Info
             if glowa[x:x + 4] in (b'Xing', b'Info') and glowa[x + 7] & 1:
                 ramki = int.from_bytes(glowa[x + 8:x + 12], 'big')
-                return ramki * 1152 / hz
+                return ramki * probek / hz
             return (rozmiar - pocz - i) * 8 / (kbps * 1000)
     except (OSError, ValueError, IndexError, EOFError, Exception):
         return None
