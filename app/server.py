@@ -945,6 +945,32 @@ def _read_template_exporter(proj: Path):
     return None
 
 
+_NAZWA_EKSPORTERA = re.compile(r'[A-Za-z0-9_-]+(?:\.py)?')
+
+
+def _eksportery() -> list:
+    """Biała lista: skrypty export_*.py leżące wprost w katalogu eksportu
+    (zwykłe pliki, nie dowiązania) — katalog instancji, nie treść projektu."""
+    try:
+        return sorted(p.name for p in EXPORT_DIR.glob('export_*.py')
+                      if p.is_file() and not p.is_symlink())
+    except OSError:
+        return []
+
+
+def _skrypt_eksportu(nazwa: str):
+    """Nazwa z dyrektywy/eksporter.conf → skrypt z białej listy albo None.
+    „X" → export_X.py, „export_X" / „export_X.py" → wprost; bez /, \\ i ..."""
+    if not _NAZWA_EKSPORTERA.fullmatch(nazwa or ''):
+        return None
+    stem = nazwa[:-3] if nazwa.endswith('.py') else nazwa
+    dozwolone = _eksportery()
+    for plik in (f'{stem}.py', f'export_{stem}.py'):
+        if plik in dozwolone:
+            return EXPORT_DIR / plik
+    return None
+
+
 async def _export_md_docx(target: Path):
     """Eksport .md → .docx silnikiem EXPORT/export_to_docx.py (obrazy + równania
     Word) — ten sam skrypt i argumenty co bot. Wynik ląduje w exports/ i jest
@@ -954,14 +980,16 @@ async def _export_md_docx(target: Path):
         return web.Response(status=500, text='Brak EXPORT/export_to_docx.py')
     proj = target.parent.parent          # processed/<md> → katalog projektu
     cwd = EXPORT_DIR
-    # Wybór SKRYPTU eksportu, w kolejności:
+    # Wybór SKRYPTU eksportu — NAZWA, nigdy ścieżka (B5: skrypt z katalogu
+    # projektu = wykonanie kodu z treści vaulta/sprawozdań):
     #   1) override per-dokument: <!-- eksporter: X --> w nagłówku .md,
     #   2) config szablonu projektu: <projekt>/szablon/eksporter.conf,
     #   3) kanoniczny EXPORT/export_to_docx.py.
-    # Skrypt projektowy musi przyjmować te same argumenty (md -o out --base-dir base).
+    # Nazwa wskazuje wyłącznie skrypt export_*.py leżący w katalogu eksportu
+    # (_skrypt_eksportu); inna nazwa albo ścieżka = 400, nic nie jest uruchamiane.
     _name = None
     try:
-        _m = re.search(r'<!--\s*(?:eksporter|exporter|export)\s*:\s*([\w./-]+)\s*-->',
+        _m = re.search(r'<!--\s*(?:eksporter|exporter|export)\s*:\s*(\S+?)\s*-->',
                        target.read_text(encoding='utf-8', errors='replace'), re.I)
         if _m:
             _name = _m.group(1).strip()
@@ -970,13 +998,16 @@ async def _export_md_docx(target: Path):
     if not _name:
         _name = _read_template_exporter(proj)
     if _name:
-        for _cand in (proj / 'szablon' / _name, proj / 'szablon' / f'export_{_name}.py',
-                      proj / f'export_{_name}.py', proj / f'{_name}.py', proj / _name,
-                      EXPORT_DIR / f'export_{_name}.py', EXPORT_DIR / _name):
-            if _cand.suffix == '.py' and _cand.exists():
-                script = _cand
-                cwd = _cand.parent
-                break
+        script = _skrypt_eksportu(_name)
+        if script is None:
+            _evlog('eksport', f'odrzucono eksporter {_name!r} dla '
+                   f'{target.relative_to(ROOT)} (dozwolone: export_*.py w katalogu '
+                   'eksportu)', level='warn')
+            return web.Response(
+                status=400, text=f'Eksport DOCX: eksporter „{_name}" niedozwolony. '
+                'Dyrektywa wybiera NAZWĘ skryptu export_<nazwa>.py z katalogu eksportu '
+                f'({", ".join(_eksportery()) or "brak"}); skrypty z katalogu projektu '
+                'nie są uruchamiane.')
     base_dir = target.parent             # do ścieżek obrazów; input/raw mają pierwszeństwo
     for cand in (proj / 'input', proj / 'raw'):
         try:

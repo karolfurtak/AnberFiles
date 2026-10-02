@@ -107,6 +107,11 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   podglądu DOCX, katalog ZIP, favikona, kosz), `[moduly]` (`podglad_docx`,
   `eksport_docx`, `lektor`, `lektor_opisy_ai`, `wylaczanie`, `druk`, `bateria`,
   `kadrowanie` — `tak`/`nie`).
+- Eksport DOCX (`?docx=1` na `.md`): skrypt wyłącznie z `katalog_eksportu` — domyślnie
+  `export_to_docx.py`; dyrektywa `<!-- eksporter: X -->` w dokumencie albo
+  `<projekt>/szablon/eksporter.conf` wybiera tylko NAZWĘ z białej listy plików
+  `export_*.py` w katalogu eksportu (`X` → `export_X.py`). Ścieżka, `/`, `\`, `..`
+  albo skrypt z katalogu projektu = 400, nic nie jest uruchamiane.
 - Hasło **tylko** w zmiennej `SERVER_PASS`, nigdy w pliku.
 - Przy starcie: brak hasła przy `haslo_wymagane = tak`, brak katalogu głównego albo
   nieudana próba zapisu w katalogu danych = komunikat na stderr i kod wyjścia 2.
