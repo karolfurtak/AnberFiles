@@ -10,7 +10,12 @@ Przebieg:
   - poprawne hasło → trwałe ciasteczko (podpis HMAC-SHA256 sekretem instancji,
     ważne 10 lat, HttpOnly, SameSite=Strict, Secure przy HTTPS),
   - złe hasło → odmowa po opóźnieniu, limit prób na adres,
-  - wylogowanie usuwa ciasteczko z przeglądarki.
+  - wylogowanie usuwa ciasteczko z przeglądarki,
+  - formularze logowania i „Ustaw hasło" niosą ukryte pole `formularz`
+    (HMAC sekretem instancji z losowej wartości ciasteczka `anberfiles_formularz`,
+    SameSite=Strict). Wymagane, gdy przeglądarka wysyła `Origin: null` — tak
+    robi Chrome/Edge przy wysyłce formularza ze strony z Referrer-Policy:
+    no-referrer (02.10.2026: logowanie na Jarvisie kończyło się 403).
 
 Pliki (katalog_danych/auth/, prawa 0600, katalog 0700):
   haslo.json — skrót hashlib.scrypt (sól losowa, parametry zapisane w pliku),
@@ -30,6 +35,7 @@ import html as _html
 import ipaddress
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -43,6 +49,8 @@ from aiohttp import web
 PLIK_HASLA = 'haslo.json'
 PLIK_SEKRETU = 'sekret'
 CIASTECZKO = 'anberfiles_sesja'
+CIASTECZKO_FORMULARZA = 'anberfiles_formularz'   # wartość losowa do tokenu formularza
+POLE_FORMULARZA = 'formularz'                    # ukryte pole z tokenem formularza
 WAZNOSC_S = 10 * 365 * 24 * 3600          # „do odwołania" — 10 lat
 MIN_DLUGOSC_HASLA = 10
 LIMIT_PROB = 10                           # prób logowania na adres …
@@ -53,6 +61,8 @@ LIMIT_FORMULARZA = 4096                   # bajtów ciała formularza logowania/
 SCIEZKA_LOGOWANIA = '/__anberfiles/zaloguj'
 SCIEZKA_USTAWIENIA = '/__anberfiles/ustaw-haslo'
 SCIEZKA_WYLOGOWANIA = '/__anberfiles/wyloguj'
+# klucz żądania aiohttp: strażnik źródła (server.py) zaznacza wysyłkę z Origin: null
+WYMAGA_TOKENU = 'anberfiles_wymaga_tokenu_formularza'
 
 # scrypt: 16 MiB pamięci na próbę (n·r·128 B, niezależnie od p); p=5 → ok. 0,5 s
 # na Raspberry Pi 5 (p=1 do 02.10.2026 — stare pliki weryfikowane parametrami z pliku)
@@ -256,6 +266,51 @@ def token_wazny(katalog: Path, token: str) -> bool:
     return wydany <= teraz + 300 and teraz - wydany < WAZNOSC_S
 
 
+# ── token formularza (CSRF przy Origin: null) ──────────────────────────────
+
+def token_formularza(katalog: Path, losowe: str) -> str:
+    """Token ukrytego pola: HMAC-SHA256(sekret instancji, losowe z ciasteczka).
+    Obca strona nie zna sekretu, a ciasteczka SameSite=Strict nie dostanie."""
+    return _podpis(zapewnij_sekret(katalog), f'formularz.{losowe}')
+
+
+def _losowe_formularza(request) -> str:
+    """Wartość z ciasteczka (wiele kart = ten sam token) albo nowa."""
+    w = request.cookies.get(CIASTECZKO_FORMULARZA, '')
+    return w if re.fullmatch(r'[0-9a-f]{32}', w) else secrets.token_hex(16)
+
+
+def token_formularza_poprawny(katalog: Path, request, form: dict) -> bool:
+    w = request.cookies.get(CIASTECZKO_FORMULARZA, '')
+    pole = str(form.get(POLE_FORMULARZA, ''))
+    if not re.fullmatch(r'[0-9a-f]{32}', w) or not pole:
+        return False
+    return hmac.compare_digest(token_formularza(katalog, w).encode('ascii'),
+                               pole.encode('ascii', 'replace'))
+
+
+def _formularz(request, katalog: Path, strona, *arg, **kw) -> web.Response:
+    """Strona z formularzem + ukryte pole tokenu + ciasteczko z wartością losową."""
+    losowe = _losowe_formularza(request)
+    odp = strona(*arg, token_form=token_formularza(katalog, losowe), **kw)
+    odp.set_cookie(CIASTECZKO_FORMULARZA, losowe, path='/', httponly=True,
+                   samesite='Strict', secure=True if request.secure else None)
+    return odp
+
+
+def _pole_formularza(token_form: str) -> str:
+    return (f'<input type="hidden" name="{POLE_FORMULARZA}" '
+            f'value="{_html.escape(token_form, quote=True)}">' if token_form else '')
+
+
+def _odmowa_formularza(request, bramka, adres) -> web.Response:
+    bramka.rejestr('ochrona', f'formularz {request.path} z Origin '
+                   f'{request.headers.get("Origin")!r} bez ważnego tokenu formularza '
+                   f'od {adres}', level='warn')
+    return web.Response(status=403, text='403 — formularz wysłany z innej strony albo '
+                        'nieaktualny. Odśwież stronę logowania (F5) i spróbuj ponownie.')
+
+
 # ── adresy i limit prób ─────────────────────────────────────────────────────
 
 def adres_w_sieciach(adres, sieci) -> bool:
@@ -354,7 +409,8 @@ def _strona(tytul: str, tresc: str, status: int) -> web.Response:
               f'<title>{_html.escape(tytul)}</title><style>{_STYL}</style>{tresc}'))
 
 
-def _strona_logowania(instancja: str, dalej: str, blad: str = '', status: int = 401):
+def _strona_logowania(instancja: str, dalej: str, blad: str = '', status: int = 401,
+                      token_form: str = ''):
     b = f'<p class="blad">{_html.escape(blad)}</p>' if blad else ''
     return _strona(f'AnberFiles — logowanie ({instancja})',
                    f'<h1>AnberFiles · {_html.escape(instancja)}</h1>{b}'
@@ -363,6 +419,7 @@ def _strona_logowania(instancja: str, dalej: str, blad: str = '', status: int = 
                    '<input id="haslo" name="haslo" type="password" autofocus required '
                    'autocomplete="current-password">'
                    f'<input type="hidden" name="dalej" value="{_html.escape(dalej)}">'
+                   + _pole_formularza(token_form) +
                    '<button type="submit">Zaloguj</button></form>'
                    '<p class="muted">To urządzenie zostanie zapamiętane — następnym '
                    'razem hasło nie będzie potrzebne.</p>', status)
@@ -385,7 +442,7 @@ def _pole_tokenu(token: str, wymagany: bool) -> str:
 
 
 def _strona_ustawienia(instancja: str, blad: str = '', status: int = 200,
-                       token: str = '', token_wymagany: bool = True):
+                       token: str = '', token_wymagany: bool = True, token_form: str = ''):
     b = f'<p class="blad">{_html.escape(blad)}</p>' if blad else ''
     return _strona(f'AnberFiles — ustaw hasło ({instancja})',
                    f'<h1>Ustaw hasło · {_html.escape(instancja)}</h1>{b}'
@@ -393,7 +450,7 @@ def _strona_ustawienia(instancja: str, blad: str = '', status: int = 200,
                    f'{MIN_DLUGOSC_HASLA} znaków) chroni dostęp z każdego urządzenia. '
                    'Zmiana później tylko poleceniem administracyjnym na serwerze.</p>'
                    f'<form method="post" action="{SCIEZKA_USTAWIENIA}">'
-                   + _pole_tokenu(token, token_wymagany) +
+                   + _pole_tokenu(token, token_wymagany) + _pole_formularza(token_form) +
                    '<label for="haslo">Hasło</label>'
                    '<input id="haslo" name="haslo" type="password" autofocus required '
                    f'minlength="{MIN_DLUGOSC_HASLA}" autocomplete="new-password">'
@@ -485,19 +542,22 @@ async def obsluz(request, handler, katalog: Path, bramka: Bramka, instancja: str
     if sciezka == SCIEZKA_LOGOWANIA and request.method == 'POST':
         if not bramka.wolno(adres):
             bramka.rejestr('logowanie', f'limit prób przekroczony z {adres}', level='warn')
-            return _strona_logowania(instancja, '/', 'Za dużo prób. Odczekaj minutę.', 429)
+            return _formularz(request, katalog, _strona_logowania, instancja, '/',
+                              'Za dużo prób. Odczekaj minutę.', 429)
         try:
             form = await czytaj_formularz(request)
         except FormularzZaDuzy:
             bramka.rejestr('logowanie', f'za duży formularz logowania z {adres}', level='warn')
             return _za_duzy()
+        if request.get(WYMAGA_TOKENU) and not token_formularza_poprawny(katalog, request, form):
+            return _odmowa_formularza(request, bramka, adres)
         dalej = _bezpieczne_dalej(str(form.get('dalej', '/')))
         if await _w_tle(sprawdz_haslo, katalog, str(form.get('haslo', ''))):
             bramka.rejestr('logowanie', f'zalogowano urządzenie z {adres}')
             return _z_ciasteczkiem(request, _przekieruj(dalej), katalog)
         await asyncio.sleep(OPOZNIENIE_ZLE_HASLO)
         bramka.rejestr('logowanie', f'złe hasło z {adres}', level='warn')
-        return _strona_logowania(instancja, dalej, 'Złe hasło.')
+        return _formularz(request, katalog, _strona_logowania, instancja, dalej, 'Złe hasło.')
 
     if token_wazny(katalog, request.cookies.get(CIASTECZKO, '')):
         if sciezka == SCIEZKA_LOGOWANIA:
@@ -506,7 +566,7 @@ async def obsluz(request, handler, katalog: Path, bramka: Bramka, instancja: str
 
     if _chce_html(request):
         dalej = '/' if sciezka == SCIEZKA_LOGOWANIA else _bezpieczne_dalej(request.path_qs)
-        return _strona_logowania(instancja, dalej)
+        return _formularz(request, katalog, _strona_logowania, instancja, dalej)
     return web.Response(status=401, text='401 — wymagane zalogowanie (ciasteczko '
                                          'urządzenia nieważne albo brak).')
 
@@ -522,27 +582,33 @@ async def _pierwsze_uruchomienie(request, katalog, bramka, instancja, adres):
     zwolniony = bramka.zwolniony_z_tokenu(adres)
     if request.path == SCIEZKA_USTAWIENIA and request.method == 'POST':
         if not bramka.wolno(adres):
-            return _strona_ustawienia(instancja, 'Za dużo prób. Odczekaj minutę.', 429)
+            return _formularz(request, katalog, _strona_ustawienia, instancja,
+                              'Za dużo prób. Odczekaj minutę.', 429)
         try:
             form = await czytaj_formularz(request)
         except FormularzZaDuzy:
             bramka.rejestr('logowanie', f'za duży formularz ustawienia hasła z {adres}',
                            level='warn')
             return _za_duzy()
+        if request.get(WYMAGA_TOKENU) and not token_formularza_poprawny(katalog, request, form):
+            return _odmowa_formularza(request, bramka, adres)
         if not zwolniony and not bramka.token_poprawny(form.get('token', '')):
             bramka.rejestr('logowanie', f'ustawienie hasła bez ważnego tokenu startowego '
                                         f'z {adres}', level='warn')
-            return _strona_ustawienia(
+            return _formularz(
+                request, katalog, _strona_ustawienia,
                 instancja, 'Brak albo zły token startowy. Weź adres z tokenem z dziennika '
                 'usługi (token zmienia się przy każdym restarcie).', 403)
         haslo, powtorz = str(form.get('haslo', '')), str(form.get('powtorz', ''))
         tok = '' if zwolniony else str(form.get('token', ''))
         if len(haslo) < MIN_DLUGOSC_HASLA:
-            return _strona_ustawienia(
+            return _formularz(
+                request, katalog, _strona_ustawienia,
                 instancja, f'Hasło musi mieć co najmniej {MIN_DLUGOSC_HASLA} znaków.', 400,
                 tok, not zwolniony)
         if not hmac.compare_digest(haslo.encode('utf-8'), powtorz.encode('utf-8')):
-            return _strona_ustawienia(instancja, 'Hasła się różnią.', 400, tok, not zwolniony)
+            return _formularz(request, katalog, _strona_ustawienia, instancja,
+                              'Hasła się różnią.', 400, tok, not zwolniony)
         if not await _w_tle(ustaw_haslo, katalog, haslo):
             return web.Response(status=403, text='Hasło zostało już ustawione.')
         bramka.uniewaznij_token()
@@ -550,7 +616,8 @@ async def _pierwsze_uruchomienie(request, katalog, bramka, instancja, adres):
                        + (' (adres zwolniony z tokenu)' if zwolniony else ' (token startowy)'))
         return _z_ciasteczkiem(request, _przekieruj('/'), katalog)
     if _chce_html(request):
-        return _strona_ustawienia(instancja, token=request.query.get('token', '')[:200],
-                                  token_wymagany=not zwolniony)
+        return _formularz(request, katalog, _strona_ustawienia, instancja,
+                          token=request.query.get('token', '')[:200],
+                          token_wymagany=not zwolniony)
     return web.Response(status=401, text='401 — hasło nieustawione: otwórz AnberFiles '
                                          'w przeglądarce i ustaw hasło.')

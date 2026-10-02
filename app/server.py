@@ -2258,7 +2258,10 @@ async def straz_zrodla(request, handler):
     """B9: (a) Host spoza listy → 421; (b) POST/PUT/PATCH/DELETE bez
     X-AnberFiles: 1 → 403. Wyjątek (b): formularze logowania i „Ustaw hasło"
     (zwykły <form method=post> przed zalogowaniem, działa bez JS i z menedżerem
-    haseł) — zamiast nagłówka zgodność Origin z Host."""
+    haseł) — zamiast nagłówka: Origin zgodny z Host → przepuść; obcy Origin → 403;
+    Origin „null" (Chrome/Edge wysyłają go z formularza, bo strony mają
+    Referrer-Policy: no-referrer) → wymagany token ukrytego pola formularza,
+    sprawdzany w logowanie.obsluz po odczycie ciała."""
     host = request.headers.get('Host')
     if host is not None and not host_dozwolony(host, KONF.dozwolone_hosty):
         return web.Response(status=421, text='421 — nieznana nazwa serwera w adresie. '
@@ -2267,7 +2270,10 @@ async def straz_zrodla(request, handler):
     if request.method in METODY_ZAPISU:
         if (KONF.logowanie == 'formularz' and request.path in
                 (_LOGOWANIE.SCIEZKA_LOGOWANIA, _LOGOWANIE.SCIEZKA_USTAWIENIA)):
-            if not origin_zgodny(request.headers.get('Origin'), host or ''):
+            origin = request.headers.get('Origin')
+            if origin is not None and origin.strip().lower() == 'null':
+                request[_LOGOWANIE.WYMAGA_TOKENU] = True
+            elif not origin_zgodny(origin, host or ''):
                 _evlog('ochrona', f'formularz {request.path} z obcego originu '
                        f'{request.headers.get("Origin")!r} od {request.remote}',
                        level='warn')

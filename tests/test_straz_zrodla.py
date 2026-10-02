@@ -176,6 +176,87 @@ def test_ustaw_haslo_z_obcego_origin_403(tmp_path):
     assert uruchom(k, sc, naglowek=False) == (403, False, 303)
 
 
+# ── formularze z Origin: null (zgłoszenie Karola 02.10.2026) ────────────────
+# Chrome/Edge przy wysyłce <form method=post> ze strony z Referrer-Policy:
+# no-referrer wysyłają „Origin: null". Dziennik Jarvisa 02.10 17:29–18:07:
+# „formularz /__anberfiles/zaloguj z obcego originu 'null' od 100.97.34.18"
+# → Karol nie mógł się zalogować (403). Odtworzenie: najpierw GET strony
+# logowania (jak przeglądarka), potem POST z tym, co strona dała, i Origin: null.
+
+def _pole(html: str, nazwa: str) -> str:
+    m = re.search(rf'name="{nazwa}" value="([^"]*)"', html)
+    return m.group(1) if m else ''
+
+
+def test_logowanie_formularzem_przegladarki_origin_null_dziala(tmp_path):
+    import logowanie
+    k = _formularz(tmp_path)
+
+    async def sc(cl):
+        strona = await cl.get('/', headers={'Accept': 'text/html'})
+        html = await strona.text()
+        token = _pole(html, logowanie.POLE_FORMULARZA)
+        dane = {'haslo': 'dobre-haslo-1234', 'dalej': _pole(html, 'dalej') or '/',
+                logowanie.POLE_FORMULARZA: token}
+        wyslij = await cl.post(logowanie.SCIEZKA_LOGOWANIA, data=dane,
+                               allow_redirects=False, headers={'Origin': 'null'})
+        lista = await cl.get('/', headers={'Accept': 'text/html'})
+        return strona.status, bool(token), wyslij.status, lista.status
+    # formularz przeglądarki nie dokłada X-AnberFiles — klient bez nagłówka
+    assert uruchom(k, sc, naglowek=False) == (401, True, 303, 200)
+
+
+def test_origin_null_bez_ciasteczka_formularza_403(tmp_path):
+    """Obca strona (sandbox, data:) też wysyła Origin: null — ale nie ma
+    ciasteczka SameSite=Strict ani nie policzy HMAC bez sekretu instancji."""
+    import logowanie
+    k = _formularz(tmp_path)
+
+    async def sc(cl):
+        html = await (await cl.get('/', headers={'Accept': 'text/html'})).text()
+        token = _pole(html, logowanie.POLE_FORMULARZA)
+        cl.session.cookie_jar.clear()              # żądanie z obcej strony: bez ciasteczka
+        bez_ciastka = await cl.post(logowanie.SCIEZKA_LOGOWANIA, allow_redirects=False,
+                                    data={'haslo': 'dobre-haslo-1234',
+                                          logowanie.POLE_FORMULARZA: token},
+                                    headers={'Origin': 'null'})
+        await cl.get('/', headers={'Accept': 'text/html'})
+        zly_token = await cl.post(logowanie.SCIEZKA_LOGOWANIA, allow_redirects=False,
+                                  data={'haslo': 'dobre-haslo-1234',
+                                        logowanie.POLE_FORMULARZA: '0' * 64},
+                                  headers={'Origin': 'null'})
+        zalogowany = await cl.get('/', headers={'Accept': 'text/html'})
+        return bez_ciastka.status, zly_token.status, zalogowany.status
+    assert uruchom(k, sc, naglowek=False) == (403, 403, 401)
+
+
+def test_ustaw_haslo_formularzem_przegladarki_origin_null_dziala(tmp_path):
+    import logowanie
+    conf = zbuduj_jarvis(tmp_path, logowanie='formularz',
+                         ustaw_haslo_bez_tokenu='127.0.0.0/8')
+    k = wczytaj(conf, haslo='')
+
+    async def sc(cl):
+        html = await (await cl.get('/', headers={'Accept': 'text/html'})).text()
+        dane = {'haslo': 'dobre-haslo-1234', 'powtorz': 'dobre-haslo-1234',
+                logowanie.POLE_FORMULARZA: _pole(html, logowanie.POLE_FORMULARZA)}
+        r = await cl.post(logowanie.SCIEZKA_USTAWIENIA, data=dane, allow_redirects=False,
+                          headers={'Origin': 'null'})
+        return r.status, logowanie.haslo_ustawione(k.katalog_auth)
+    assert uruchom(k, sc, naglowek=False) == (303, True)
+
+
+def test_ciasteczko_formularza_bez_secure_przez_http(tmp_path):
+    """Przez HTTP (Tailscale) ciasteczko z flagą Secure nie zostałoby zapisane."""
+    k = _formularz(tmp_path)
+
+    async def sc(cl):
+        r = await cl.get('/', headers={'Accept': 'text/html'})
+        return r.headers.getall('Set-Cookie', [])
+    ciastka = uruchom(k, sc, naglowek=False)
+    assert ciastka and all('secure' not in c.lower() for c in ciastka)
+
+
 # ── strony: każdy fetch/XHR zmieniający stan idzie przez wspólną funkcję ─────
 
 def test_kod_stron_bez_golych_zadan_zmieniajacych_stan():
