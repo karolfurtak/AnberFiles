@@ -53,7 +53,7 @@ hasło): ok. 8 min; z tymi krokami zwykle poniżej 30 min.
 5. **Kod** (1 min):
    `sudo -u anberfiles git clone https://github.com/karolfurtak/AnberFiles.git /srv/anberfiles/kod`
 6. **Środowisko Pythona** (zmierzone: ok. 1 min, 7 bibliotek):
-   `sudo -u anberfiles python3 -m venv /srv/anberfiles/venv && sudo -u anberfiles /srv/anberfiles/venv/bin/pip install -r /srv/anberfiles/kod/requirements.txt`
+   `sudo -u anberfiles python3 -m venv /srv/anberfiles/venv && sudo -u anberfiles /srv/anberfiles/venv/bin/pip install --require-hashes -r /srv/anberfiles/kod/requirements.txt`
 7. **Zatrzymanie CUPS przed wgraniem drukarek** (1 min):
    `sudo systemctl stop cups`
 8. **Pliki instancji z kopii** (zmierzone: 2 s przy 272 kB; więcej przy dużej liczbie nagrań):

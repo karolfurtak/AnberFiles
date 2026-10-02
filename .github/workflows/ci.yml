@@ -9,7 +9,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install ruff aiohttp
+      - name: Zależności (przypięte, ze skrótami sha256) i narzędzia
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Audyt zależności (znane podatności)
+        run: pip-audit -r requirements.txt --require-hashes --disable-pip --progress-spinner off
       - run: ruff check --select E9,F app/ tools/ tests/ narzedzia/anberfiles-reset-hasla
       - run: python -m py_compile app/server.py app/konfiguracja.py app/logowanie.py tools/czytaj_tts.py tools/czas_z_gita.py narzedzia/anberfiles-reset-hasla
       - name: Składnia skryptów sh
@@ -31,7 +36,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -r requirements-dev.txt
+      - name: Zależności (przypięte, ze skrótami sha256) i narzędzia
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install -r requirements-dev.txt
       - name: Ustawienia instancji Jarvis (przykład z katalogami tymczasowymi)
         if: matrix.instancja == 'jarvis'
         run: |

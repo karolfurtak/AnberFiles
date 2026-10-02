@@ -1,0 +1,14 @@
+# Zależności serwera (app/) i lektora (tools/czytaj_tts.py) — WEJŚCIE.
+# Instaluje się requirements.txt (wersje == i skróty sha256, także zależności
+# przechodnie, wheele dla wszystkich platform). Po zmianie tego pliku:
+#   uv pip compile requirements.in --universal --fork-strategy fewest \
+#       --python-version 3.10 --generate-hashes --annotation-style line -o requirements.txt
+# (--python-version 3.10: wersje działające na konsoli Anbernic i na Jarvisie 3.13)
+aiohttp
+markdown
+nh3                 # sanityzacja HTML podglądu .md (bez niej: HTML pokazany jako tekst)
+openpyxl
+python-docx
+Pillow
+edge-tts
+num2words

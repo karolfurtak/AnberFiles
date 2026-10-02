@@ -1,3 +1,8 @@
--r requirements.txt
+# Narzędzia deweloperskie (testy, lint, audyt zależności) — instalowane DRUGIM
+# poleceniem, bez skrótów i BEZ -r requirements.txt (tamten plik wymaga
+# --require-hashes). Kolejność:
+#   pip install --require-hashes -r requirements.txt
+#   pip install -r requirements-dev.txt
 pytest
 ruff
+pip-audit

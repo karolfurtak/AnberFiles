@@ -82,7 +82,12 @@ ale serwuje dowolne drzewo katalogów.
 
 ## Wymagania
 
-- Python 3.10+ (sprawdzane w CI na 3.10 i 3.13), `pip install -r requirements.txt`
+- Python 3.10+ (sprawdzane w CI na 3.10 i 3.13),
+  `pip install --require-hashes -r requirements.txt` — wersje przypięte (`==`) ze skrótami
+  sha256 wszystkich plików dystrybucji (Linux x86_64 i aarch64, Python 3.10 i 3.13), także
+  zależności przechodnie; wejście: `requirements.in` (polecenie kompilacji w nagłówku obu
+  plików). Narzędzia (pytest, ruff, pip-audit): `pip install -r requirements-dev.txt`.
+  CI uruchamia `pip-audit` na `requirements.txt`.
 - testowane na stock firmware Anbernic RG40XX V (Ubuntu 22.04, build 20251225) —
   ale działa na dowolnym Linuksie
 
