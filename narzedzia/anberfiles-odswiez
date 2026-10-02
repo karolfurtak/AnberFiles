@@ -5,9 +5,14 @@
 # git pull --ff-only z limitem 120 s na repozytorium. Wypis: „r: przed -> po".
 # Uruchamia go anberfiles-vault.timer (co 15 min) jako użytkownik anberfiles.
 # ANBERFILES_BAZA — katalog bazowy (domyślnie /srv/anberfiles).
+# Po udanym pullu tools/czas_z_gita.py przywraca czasy modyfikacji plików z historii
+# (inaczej wszystkie mają datę pobrania). Błąd tego kroku to tylko ostrzeżenie.
+# ANBERFILES_PYTHON (domyślnie <baza>/venv/bin/python), ANBERFILES_KOD (domyślnie <baza>/kod).
 # Kod wyjścia: 0 = oba klony aktualne, 1 = choć jeden błąd (opis na stderr).
 set -u
 BAZA="${ANBERFILES_BAZA:-/srv/anberfiles}"
+PYTHON="${ANBERFILES_PYTHON:-$BAZA/venv/bin/python}"
+SKRYPT_CZASU="${ANBERFILES_KOD:-$BAZA/kod}/tools/czas_z_gita.py"
 KOD=0
 for r in vault wykonawca; do
     k="$BAZA/$r"
@@ -23,5 +28,10 @@ for r in vault wykonawca; do
     fi
     po="$(git -C "$k" rev-parse --short HEAD)"
     echo "$r: $przed -> $po"
+    if ! czas="$(timeout 120 "$PYTHON" "$SKRYPT_CZASU" "$k" 2>&1)"; then
+        echo "$r: OSTRZEŻENIE — czasy plików z historii NIE przywrócone: $czas" >&2
+    else
+        echo "$r: $czas"
+    fi
 done
 exit $KOD
