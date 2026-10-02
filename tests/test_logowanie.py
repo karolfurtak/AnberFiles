@@ -293,7 +293,8 @@ def test_ustawienie_hasla_walidacja(tmp_path, haslo, powtorz):
 
     async def sc(cl):
         r = await cl.post(logowanie.SCIEZKA_USTAWIENIA, allow_redirects=False,
-                          data={'haslo': haslo, 'powtorz': powtorz})
+                          data={'haslo': haslo, 'powtorz': powtorz,
+                                'token': _token_startowy()})
         return r.status, _token(r)
     st, tok = uruchom(k, sc)
     assert st == 400 and tok == ''
@@ -306,7 +307,8 @@ def test_ustawienie_hasla_skrot_ciasteczko_i_ekran_znika(tmp_path):
 
     async def sc(cl):
         r = await cl.post(logowanie.SCIEZKA_USTAWIENIA, allow_redirects=False,
-                          data={'haslo': HASLO_F, 'powtorz': HASLO_F})
+                          data={'haslo': HASLO_F, 'powtorz': HASLO_F,
+                                'token': _token_startowy()})
         cl.session.cookie_jar.clear()
         tok = _token(r)
         lst = await cl.get('/', headers={**HTML, **_c(tok)})
@@ -570,3 +572,139 @@ def test_brak_przelaczenia_gdy_juz_w_srodowisku(tmp_path, monkeypatch):
     mod = _wczytaj_reset()
     monkeypatch.setattr(os, 'execv', lambda p, a: pytest.fail('execv w pętli'))
     assert mod.przelacz_na_srodowisko([]) is False
+
+
+# ── token startowy ekranu „Ustaw hasło" (audyt A1) ──────────────────────────
+
+def _token_startowy():
+    """Token wydany przez działający serwer (tylko w pamięci procesu)."""
+    import server
+    return server._BRAMKA.token_startowy
+
+
+async def _ustaw(cl, adres='192.168.1.10', **pola):
+    import logowanie
+    dane = {'haslo': HASLO_F, 'powtorz': HASLO_F, **pola}
+    return await cl.post(logowanie.SCIEZKA_USTAWIENIA, allow_redirects=False, data=dane,
+                         headers={'X-Test-Remote': adres})
+
+
+def test_ustaw_haslo_bez_tokenu_403(tmp_path):
+    import logowanie
+    _, k = _instancja(tmp_path, haslo=None)
+
+    async def sc(cl):
+        r = await _ustaw(cl)
+        return r.status, _token(r)
+    st, tok = uruchom(k, sc)
+    assert st == 403 and tok == ''
+    assert not (k.katalog_auth / logowanie.PLIK_HASLA).exists()
+
+
+def test_ustaw_haslo_zly_token_403(tmp_path):
+    import logowanie
+    _, k = _instancja(tmp_path, haslo=None)
+
+    async def sc(cl):
+        dobry = _token_startowy()
+        r = await _ustaw(cl, token=dobry[:-1] + ('A' if dobry[-1] != 'A' else 'B'))
+        return r.status
+    assert uruchom(k, sc) == 403
+    assert not (k.katalog_auth / logowanie.PLIK_HASLA).exists()
+
+
+def test_ustaw_haslo_z_tokenem_303_i_token_uniewazniony(tmp_path):
+    import logowanie
+    _, k = _instancja(tmp_path, haslo=None)
+    wyniki = {}
+
+    async def sc(cl):
+        tok = _token_startowy()
+        r = await _ustaw(cl, token=tok)
+        wyniki['po_ustawieniu'] = _token_startowy()
+        # reset poleceniem (bez restartu): ekran wraca z NOWYM tokenem, stary nieważny
+        logowanie.usun_haslo(k.katalog_auth)
+        await cl.get('/', headers={**HTML, 'X-Test-Remote': '192.168.1.10'})
+        wyniki['nowy'] = _token_startowy()
+        stary = await _ustaw(cl, token=tok)
+        return tok, r.status, _token(r), stary.status
+    tok, st, ciastko, st_stary = uruchom(k, sc)
+    assert st == 303 and ciastko
+    assert wyniki['po_ustawieniu'] is None
+    assert wyniki['nowy'] and wyniki['nowy'] != tok
+    assert st_stary == 403
+
+
+@pytest.mark.parametrize('adres,oczek', [('192.168.1.10', 303), ('100.64.1.2', 403)])
+def test_ustaw_haslo_bez_tokenu_z_adresu_z_listy(tmp_path, adres, oczek):
+    """Kontrola rozróżniająca: adres z ustaw_haslo_bez_tokenu nie potrzebuje
+    tokenu; adres prywatny spoza listy — nadal potrzebuje."""
+    _, k = _instancja(tmp_path, haslo=None, ustaw_haslo_bez_tokenu='192.168.0.0/16')
+
+    async def sc(cl):
+        return (await _ustaw(cl, adres=adres)).status
+    assert uruchom(k, sc) == oczek
+
+
+def test_lista_bez_tokenu_nie_zwalnia_z_sieci_prywatnej(tmp_path):
+    """Adres publiczny na liście bez tokenu — nadal 403 (ograniczenie zostaje)."""
+    _, k = _instancja(tmp_path, haslo=None, ustaw_haslo_bez_tokenu='203.0.113.0/24')
+
+    async def sc(cl):
+        return (await _ustaw(cl, adres='203.0.113.5', token=_token_startowy())).status
+    assert uruchom(k, sc) == 403
+
+
+def test_token_ogloszony_w_dzienniku_uslugi(tmp_path, capfd):
+    _, k = _instancja(tmp_path, haslo=None)
+    wynik = {}
+
+    async def sc(cl):
+        wynik['tok'] = _token_startowy()
+        r = await cl.get('/__anberfiles/ustaw-haslo?token=' + wynik['tok'],
+                         headers={**HTML, 'X-Test-Remote': '192.168.1.10'})
+        return await r.text()
+    html = uruchom(k, sc)
+    out, err = capfd.readouterr()
+    tok = wynik['tok']
+    assert len(tok) >= 32
+    assert f'/__anberfiles/ustaw-haslo?token={tok}' in out + err
+    assert f'name="token" value="{tok}"' in html and 'type="hidden"' in html
+    rejestr = (k.rejestr_zdarzen).read_text(encoding='utf-8')
+    assert tok not in rejestr                       # token tylko w dzienniku usługi
+
+
+def test_ekran_bez_tokenu_w_adresie_ma_pole_tokenu(tmp_path):
+    _, k = _instancja(tmp_path, haslo=None)
+
+    async def sc(cl):
+        r = await cl.get('/', headers={**HTML, 'X-Test-Remote': '192.168.1.10'})
+        return await r.text()
+    html = uruchom(k, sc)
+    assert 'name="token"' in html and 'journalctl' in html
+
+
+def test_haslo_ustawione_brak_tokenu(tmp_path):
+    _, k = _instancja(tmp_path)
+
+    async def sc(cl):
+        return _token_startowy()
+    assert uruchom(k, sc) is None
+
+
+@pytest.mark.parametrize('wartosc', ['nie-siec', '192.168.1.300/24', '10.0.0.0/33'])
+def test_lista_bez_tokenu_zla_wartosc_to_blad(tmp_path, wartosc):
+    import konfiguracja
+    conf = zbuduj_jarvis(tmp_path, ustaw_haslo_bez_tokenu=wartosc)
+    with pytest.raises(konfiguracja.BladKonfiguracji):
+        wczytaj(conf)
+
+
+def test_lista_bez_tokenu_domyslnie_pusta(tmp_path):
+    import ipaddress
+    import konfiguracja
+    assert konfiguracja.wczytaj(env={}).ustaw_haslo_bez_tokenu == ()
+    conf = zbuduj_jarvis(tmp_path, ustaw_haslo_bez_tokenu='127.0.0.1/32, 192.168.0.0/16 '
+                                                          '100.64.0.0/10')
+    assert wczytaj(conf).ustaw_haslo_bez_tokenu == tuple(
+        ipaddress.ip_network(s) for s in ('127.0.0.1/32', '192.168.0.0/16', '100.64.0.0/10'))

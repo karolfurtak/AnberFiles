@@ -2,7 +2,8 @@
 # Kopia robocza leży POZA repozytorium (np. /etc/anberfiles/jarvis.conf),
 # a usługa wskazuje ją zmienną ANBERFILES_CONF.
 # Hasło NIE w tym pliku. Logowanie „formularz": hasło ustawia się w przeglądarce
-# przy pierwszym uruchomieniu (ekran „Ustaw hasło", tylko z sieci prywatnej i Tailscale),
+# przy pierwszym uruchomieniu (ekran „Ustaw hasło", tylko z sieci prywatnej i Tailscale,
+# z jednorazowym tokenem z dziennika usługi — patrz ustaw_haslo_bez_tokenu niżej),
 # skrót leży w katalog_danych/auth/; reset: sudo anberfiles-reset-hasla.
 # Logowanie „basic": zmienna SERVER_PASS (np. EnvironmentFile=/etc/anberfiles/haslo.env).
 # Priorytet: zmienna środowiska (SERVER_HOST, SERVER_PORT, SERVER_USER) > ten plik > domyślne.
@@ -16,7 +17,17 @@ uzytkownik_www  = karol
 haslo_wymagane  = tak            ; przy logowanie = basic: pusty SERVER_PASS = serwer nie startuje
 logowanie       = formularz      ; basic = okno HTTP Basic (konsola) · formularz = strona logowania + zapamiętane urządzenie
 tylko_odczyt    = tak            ; wgrywanie, usuwanie, zmiana nazwy, nowy katalog → 403
-limit_wgrywania_mb = 512         ; łączny rozmiar jednego wgrywania plików (MB), ponad → 413
+# Ekran „Ustaw hasło" (logowanie = formularz, hasło nieustawione) przyjmuje hasło tylko
+# z jednorazowym tokenem startowym — adres z tokenem drukuje usługa do dziennika:
+#   sudo journalctl -u anberfiles -n 50 | grep token
+# ustaw_haslo_bez_tokenu: adresy/sieci (CIDR, po przecinku lub spacji), z których hasło
+# można ustawić BEZ tokenu. Puste = token wymagany od wszystkich (bezpieczna wartość
+# domyślna). Przykład (sieci prywatne i Tailscale):
+#   ustaw_haslo_bez_tokenu = 192.168.0.0/16, 100.64.0.0/10
+# Im węższa lista (np. jeden adres Tailscale własnego laptopa), tym bezpieczniej.
+# Ograniczenie do sieci prywatnych i Tailscale obowiązuje zawsze, także z tokenem.
+ustaw_haslo_bez_tokenu =
+limit_wgrywania_mb = 512        ; łączny rozmiar jednego wgrywania plików (MB), ponad → 413
 prog_pamieci_mb = 400            ; serwer + procesy potomne (soffice, lektor): ostrzeżenie w rejestrze zdarzeń
 
 [katalogi]

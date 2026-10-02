@@ -52,13 +52,20 @@ jobs:
           EKRAN=$(curl -s -H 'Accept: text/html' $U/)
           echo "$EKRAN" | grep -q 'name="powtorz"' || { echo "BŁĄD: brak ekranu Ustaw hasło"; kill $PID; exit 1; }
           H="ci-haslo-$GITHUB_RUN_ID"
-          UST=$(curl -s -o /dev/null -w '%{http_code}' -c "$RUNNER_TEMP/c.txt"                 --data-urlencode "haslo=$H" --data-urlencode "powtorz=$H" $U/__anberfiles/ustaw-haslo)
+          # bez tokenu startowego → 403; token (jednorazowy) tylko w dzienniku serwera
+          BEZTOK=$(curl -s -o /dev/null -w '%{http_code}' --data-urlencode "haslo=$H" --data-urlencode "powtorz=$H" $U/__anberfiles/ustaw-haslo)
+          TOK=$(grep -o 'ustaw-haslo?token=[A-Za-z0-9_-]*' "$RUNNER_TEMP/serwer.log" | head -1 | cut -d= -f2)
+          test -n "$TOK" || { echo "BŁĄD: brak tokenu startowego w dzienniku"; cat "$RUNNER_TEMP/serwer.log"; kill $PID; exit 1; }
+          # formularz ponad 4 KiB → 413 przed wczytaniem
+          DUZY=$(head -c 1100000 /dev/zero | tr '\0' x | curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/x-www-form-urlencoded' --data-binary @- $U/__anberfiles/ustaw-haslo)
+          UST=$(curl -s -o /dev/null -w '%{http_code}' -c "$RUNNER_TEMP/c.txt" --data-urlencode "token=$TOK" --data-urlencode "haslo=$H" --data-urlencode "powtorz=$H" $U/__anberfiles/ustaw-haslo)
           Z=$(curl -s -o /dev/null -w '%{http_code}' -b "$RUNNER_TEMP/c.txt" $U/)
           BEZ=$(curl -s -o /dev/null -w '%{http_code}' $U/)
           ZLE=$(curl -s -o /dev/null -w '%{http_code}' --data-urlencode "haslo=zle-haslo-000" $U/__anberfiles/zaloguj)
           kill $PID; cat "$RUNNER_TEMP/serwer.log"
-          echo "ustawienie: $UST, z ciasteczkiem: $Z, bez: $BEZ, złe hasło: $ZLE"
+          echo "bez tokenu: $BEZTOK, 1 MB: $DUZY, ustawienie z tokenem: $UST, z ciasteczkiem: $Z, bez: $BEZ, złe hasło: $ZLE"
           ls -l "$RUNNER_TEMP/anberfiles/dane/auth"
+          test "$BEZTOK" = 403 && test "$DUZY" = 413
           test "$UST" = 303 && test "$Z" = 200 && test "$BEZ" = 401 && test "$ZLE" = 401
           ! grep -rq "$H" "$RUNNER_TEMP/anberfiles/dane"
       - name: Odmowa startu bez hasła (logowanie basic)

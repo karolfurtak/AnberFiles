@@ -103,16 +103,23 @@ hasło): ok. 8 min; z tymi krokami zwykle poniżej 30 min.
     `systemctl is-enabled anberfiles anberfiles-vault.timer`
 17. **Hasło** (1 min; port 8790 jest dostępny tylko przez Tailscale — zapora `ufw`
     domyślnie odrzuca ruch przychodzący z sieci lokalnej i nie ma reguły dla 8790;
-    reguły `ufw allow 8790` NIE dodawać): z urządzenia w Tailscale otworzyć `http://<adres-tailscale>:8790/`,
-    ekran „Ustaw hasło" (co najmniej 10 znaków). Ekran działa wyłącznie z sieci lokalnej
-    i Tailscale; po ustawieniu znika na stałe.
+    reguły `ufw allow 8790` NIE dodawać): adres z jednorazowym tokenem startowym
+    odczytać z dziennika usługi: `sudo journalctl -u anberfiles -n 50 --no-pager | grep token`
+    (linia `http://<host>:8790/__anberfiles/ustaw-haslo?token=…`); z urządzenia w Tailscale
+    otworzyć ten adres, podmieniając nazwę hosta na `<adres-tailscale>`, i ustawić hasło
+    (co najmniej 10 znaków). Bez tokenu ekran odrzuca hasło (403), chyba że adres klienta
+    jest na liście `ustaw_haslo_bez_tokenu` w `jarvis.conf`. Token żyje tylko w pamięci
+    usługi: restart wydaje nowy, ustawienie hasła go unieważnia. Ekran działa wyłącznie
+    z sieci lokalnej i Tailscale; po ustawieniu znika na stałe.
 18. **Dowód** (3 min): `sudo reboot`, po starcie ponownie krok 15 i wejście z zapamiętanego
     urządzenia bez hasła.
 
 ## 3. Hasło zapomniane albo urządzenie utracone
 
 `sudo anberfiles-reset-hasla` — usuwa skrót hasła i wymienia sekret ciasteczek
-(wszystkie urządzenia wylogowane). Restart usługi niepotrzebny. Potem krok 17.
+(wszystkie urządzenia wylogowane). Restart usługi niepotrzebny. Potem krok 17
+(nowy token startowy serwer wypisuje do dziennika przy pierwszym wejściu na stronę
+po resecie).
 Resetu przez stronę WWW nie ma.
 
 Odtworzenie z **obrazu całej karty systemowej** przywraca też `dane/auth/`

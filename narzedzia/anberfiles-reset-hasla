@@ -231,6 +231,9 @@ def glowna(argv=None) -> int:
     print('  restart usługi niepotrzebny (serwer czyta pliki przy każdym żądaniu)')
     print('Co dalej: otwórz AnberFiles przez Tailscale (http://<adres-tailscale>:'
           f'{k.port}/) i ustaw nowe hasło na ekranie „Ustaw hasło".')
+    print('  Ekran wymaga jednorazowego tokenu startowego: serwer wypisze go do dziennika '
+          'przy pierwszym wejściu na stronę — sudo journalctl -u anberfiles -n 50 '
+          '--no-pager | grep token')
     return 0
 
 

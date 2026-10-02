@@ -202,6 +202,8 @@ IPV4 = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b')
     'narzedzia/anberfiles-reset-hasla'])
 def test_bez_adresow_ip_i_hasel(plik):
     t = (REPO / plik).read_text(encoding='utf-8')
-    reszta = [a for a in IPV4.findall(t) if a not in ('0.0.0.0', '127.0.0.1')]
+    # dozwolone: adresy specjalne i ogólne zakresy sieci prywatnych / Tailscale
+    reszta = [a for a in IPV4.findall(t)
+              if a not in ('0.0.0.0', '127.0.0.1', '192.168.0.0', '100.64.0.0')]
     assert reszta == [], reszta
     assert not re.search(r'SERVER_PASS=\S', t)

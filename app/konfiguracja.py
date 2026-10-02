@@ -17,7 +17,9 @@ Moduł działa na Pythonie 3.10 (Anbernic) i 3.13 (Jarvis); tylko biblioteka
 standardowa.
 """
 import configparser
+import ipaddress
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,7 +39,7 @@ MODULY = ('podglad_docx', 'eksport_docx', 'lektor', 'lektor_opisy_ai',
 KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
-               'limit_wgrywania_mb', 'prog_pamieci_mb'),
+               'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -79,6 +81,9 @@ class Konfiguracja:
     logowanie: str = 'basic'
     limit_wgrywania_mb: int = 512        # łączny rozmiar jednego wgrywania (413 ponad)
     prog_pamieci_mb: int = 400           # serwer + procesy potomne: ostrzeżenie w rejestrze
+    # sieci, z których ekran „Ustaw hasło" przyjmuje hasło BEZ tokenu startowego
+    # (domyślnie żadne — token wymagany od wszystkich)
+    ustaw_haslo_bez_tokenu: tuple = ()
 
     @property
     def katalog_auth(self) -> Path:
@@ -131,6 +136,20 @@ def _dodatnia(klucz: str, tekst: str) -> int:
     if v < 1:
         raise BladKonfiguracji(f'[serwer] {klucz} = {v}: wymagana liczba dodatnia')
     return v
+
+
+def _sieci(klucz: str, tekst: str) -> tuple:
+    """Lista adresów/sieci CIDR oddzielonych przecinkami lub spacjami."""
+    wynik = []
+    for s in re.split(r'[\s,]+', tekst.strip()):
+        if not s:
+            continue
+        try:
+            wynik.append(ipaddress.ip_network(s, strict=False))
+        except ValueError:
+            raise BladKonfiguracji(f'[serwer] {klucz}: {s!r} nie jest adresem '
+                                   'ani siecią (np. 192.168.0.0/16)') from None
+    return tuple(wynik)
 
 
 def _czytaj_plik(sciezka: Path) -> dict:
@@ -219,6 +238,8 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         limit_wgrywania_mb=_dodatnia('limit_wgrywania_mb',
                                      s.get('limit_wgrywania_mb', '512')),
         prog_pamieci_mb=_dodatnia('prog_pamieci_mb', s.get('prog_pamieci_mb', '400')),
+        ustaw_haslo_bez_tokenu=_sieci('ustaw_haslo_bez_tokenu',
+                                      s.get('ustaw_haslo_bez_tokenu', '')),
     )
 
 

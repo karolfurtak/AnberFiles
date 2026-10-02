@@ -66,8 +66,9 @@ def test_instancja_jarvis_z_przykladu(tmp_path):
 def test_przyklad_jarvis_bez_adresow_ip_i_hasel():
     import re
     tekst = PRZYKLAD_JARVIS.read_text(encoding='utf-8')
-    assert not re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
-                         tekst.replace('0.0.0.0', ''))
+    for ogolny in ('0.0.0.0', '192.168.0.0/16', '100.64.0.0/10'):   # zakresy ogólne
+        tekst = tekst.replace(ogolny, '')
+    assert not re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', tekst)
     assert 'SERVER_PASS=' not in tekst
 
 

@@ -4,7 +4,9 @@
 Przebieg:
   - pierwsze uruchomienie (brak pliku skrótu): ekran „Ustaw hasło", dostępny
     WYŁĄCZNIE z sieci lokalnej i Tailscale (adres z request.remote, nagłówki
-    X-Forwarded-* są ignorowane); po ustawieniu ekran znika na stałe,
+    X-Forwarded-* są ignorowane) i tylko z jednorazowym tokenem startowym
+    z dziennika usługi (klasa Bramka; zwolnienie: ustaw_haslo_bez_tokenu);
+    po ustawieniu ekran znika na stałe,
   - poprawne hasło → trwałe ciasteczko (podpis HMAC-SHA256 sekretem instancji,
     ważne 10 lat, HttpOnly, SameSite=Strict, Secure przy HTTPS),
   - złe hasło → odmowa po opóźnieniu, limit prób na adres,
@@ -29,6 +31,7 @@ import ipaddress
 import json
 import os
 import secrets
+import sys
 import time
 from collections import deque
 from urllib.parse import parse_qsl
@@ -254,8 +257,8 @@ def token_wazny(katalog: Path, token: str) -> bool:
 
 # ── adresy i limit prób ─────────────────────────────────────────────────────
 
-def adres_dozwolony_do_ustawienia(adres) -> bool:
-    """Czy z adresu klienta wolno ustawić hasło (sieć lokalna, Tailscale)."""
+def adres_w_sieciach(adres, sieci) -> bool:
+    """Czy adres klienta (request.remote) należy do którejś z sieci."""
     if not adres:
         return False
     try:
@@ -264,15 +267,58 @@ def adres_dozwolony_do_ustawienia(adres) -> bool:
         return False
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return any(ip.version == s.version and ip in s for s in SIECI_USTAWIENIA)
+    return any(ip.version == s.version and ip in s for s in sieci)
+
+
+def adres_dozwolony_do_ustawienia(adres) -> bool:
+    """Czy z adresu klienta wolno ustawić hasło (sieć lokalna, Tailscale)."""
+    return adres_w_sieciach(adres, SIECI_USTAWIENIA)
+
+
+def _oglos_na_stderr(token: str) -> None:
+    print('AnberFiles: hasło NIEUSTAWIONE — jednorazowy token startowy ekranu '
+          f'„Ustaw hasło": {SCIEZKA_USTAWIENIA}?token={token}', file=sys.stderr, flush=True)
 
 
 class Bramka:
-    """Limit prób logowania i ustawienia hasła na adres (okno przesuwne)."""
+    """Stan logowania w pamięci procesu: limit prób logowania i ustawienia
+    hasła na adres (okno przesuwne) oraz jednorazowy token startowy.
 
-    def __init__(self, rejestr=None):
+    Token startowy (A1): przy nieustawionym haśle ekran „Ustaw hasło" przyjmuje
+    hasło tylko z tokenem — losowym, wydrukowanym do dziennika usługi (stdout/
+    stderr → journal) razem z gotowym adresem. Trzymany WYŁĄCZNIE w pamięci:
+    nie leży na dysku (kopia plików instancji go nie zabierze), restart usługi
+    wydaje nowy, ustawienie hasła go unieważnia. Adresy z bez_tokenu (ustawienie
+    ustaw_haslo_bez_tokenu) ustawiają hasło bez tokenu; ograniczenie do sieci
+    prywatnych i Tailscale obowiązuje zawsze."""
+
+    def __init__(self, rejestr=None, bez_tokenu=(), oglos=None):
         self._proby = {}
         self.rejestr = rejestr or (lambda *a, **k: None)
+        self.bez_tokenu = tuple(bez_tokenu)
+        self.oglos = oglos or _oglos_na_stderr
+        self.token_startowy = None
+
+    def zapewnij_token(self) -> str:
+        """Token startowy; nowy (i ogłoszony w dzienniku usługi), gdy brak."""
+        if self.token_startowy is None:
+            self.token_startowy = secrets.token_urlsafe(32)
+            self.oglos(self.token_startowy)
+            self.rejestr('logowanie', 'hasło nieustawione: wydano token startowy '
+                                      '(adres w dzienniku usługi)')
+        return self.token_startowy
+
+    def uniewaznij_token(self) -> None:
+        self.token_startowy = None
+
+    def token_poprawny(self, token: str) -> bool:
+        wzor = self.token_startowy
+        if not wzor or not token:
+            return False
+        return hmac.compare_digest(str(token).encode('utf-8'), wzor.encode('utf-8'))
+
+    def zwolniony_z_tokenu(self, adres) -> bool:
+        return adres_w_sieciach(adres, self.bez_tokenu)
 
     def wolno(self, adres) -> bool:
         teraz = time.monotonic()
@@ -321,7 +367,24 @@ def _strona_logowania(instancja: str, dalej: str, blad: str = '', status: int = 
                    'razem hasło nie będzie potrzebne.</p>', status)
 
 
-def _strona_ustawienia(instancja: str, blad: str = '', status: int = 200):
+def _pole_tokenu(token: str, wymagany: bool) -> str:
+    """Token startowy z adresu (?token=) → pole ukryte; brak tokenu, a adres
+    nie jest zwolniony → pole do wklejenia z podpowiedzią, skąd go wziąć."""
+    if token:
+        return (f'<input type="hidden" name="token" '
+                f'value="{_html.escape(token, quote=True)}">')
+    if not wymagany:
+        return ''
+    return ('<label for="token">Token startowy</label>'
+            '<input id="token" name="token" type="text" required autocomplete="off" '
+            'spellcheck="false">'
+            '<p class="muted">Jednorazowy token jest w dzienniku usługi na serwerze: '
+            '<code>sudo journalctl -u anberfiles -n 50 | grep token</code> — '
+            'tam też gotowy adres z tokenem.</p>')
+
+
+def _strona_ustawienia(instancja: str, blad: str = '', status: int = 200,
+                       token: str = '', token_wymagany: bool = True):
     b = f'<p class="blad">{_html.escape(blad)}</p>' if blad else ''
     return _strona(f'AnberFiles — ustaw hasło ({instancja})',
                    f'<h1>Ustaw hasło · {_html.escape(instancja)}</h1>{b}'
@@ -329,6 +392,7 @@ def _strona_ustawienia(instancja: str, blad: str = '', status: int = 200):
                    f'{MIN_DLUGOSC_HASLA} znaków) chroni dostęp z każdego urządzenia. '
                    'Zmiana później tylko poleceniem administracyjnym na serwerze.</p>'
                    f'<form method="post" action="{SCIEZKA_USTAWIENIA}">'
+                   + _pole_tokenu(token, token_wymagany) +
                    '<label for="haslo">Hasło</label>'
                    '<input id="haslo" name="haslo" type="password" autofocus required '
                    f'minlength="{MIN_DLUGOSC_HASLA}" autocomplete="new-password">'
@@ -411,6 +475,7 @@ async def obsluz(request, handler, katalog: Path, bramka: Bramka, instancja: str
 
     if not haslo_ustawione(katalog):
         return await _pierwsze_uruchomienie(request, katalog, bramka, instancja, adres)
+    bramka.uniewaznij_token()            # hasło jest — token startowy przestaje działać
 
     if sciezka == SCIEZKA_USTAWIENIA:
         return web.Response(status=403, text='Hasło jest już ustawione. Zmiana tylko '
@@ -452,6 +517,8 @@ async def _pierwsze_uruchomienie(request, katalog, bramka, instancja, adres):
             status=403, text='403 — hasło nie jest jeszcze ustawione, a ustawić je można '
                              'wyłącznie z sieci lokalnej albo Tailscale. Adres '
                              f'{adres} jest spoza tych sieci.')
+    bramka.zapewnij_token()              # np. po resecie hasła bez restartu usługi
+    zwolniony = bramka.zwolniony_z_tokenu(adres)
     if request.path == SCIEZKA_USTAWIENIA and request.method == 'POST':
         if not bramka.wolno(adres):
             return _strona_ustawienia(instancja, 'Za dużo prób. Odczekaj minutę.', 429)
@@ -461,17 +528,28 @@ async def _pierwsze_uruchomienie(request, katalog, bramka, instancja, adres):
             bramka.rejestr('logowanie', f'za duży formularz ustawienia hasła z {adres}',
                            level='warn')
             return _za_duzy()
+        if not zwolniony and not bramka.token_poprawny(form.get('token', '')):
+            bramka.rejestr('logowanie', f'ustawienie hasła bez ważnego tokenu startowego '
+                                        f'z {adres}', level='warn')
+            return _strona_ustawienia(
+                instancja, 'Brak albo zły token startowy. Weź adres z tokenem z dziennika '
+                'usługi (token zmienia się przy każdym restarcie).', 403)
         haslo, powtorz = str(form.get('haslo', '')), str(form.get('powtorz', ''))
+        tok = '' if zwolniony else str(form.get('token', ''))
         if len(haslo) < MIN_DLUGOSC_HASLA:
             return _strona_ustawienia(
-                instancja, f'Hasło musi mieć co najmniej {MIN_DLUGOSC_HASLA} znaków.', 400)
+                instancja, f'Hasło musi mieć co najmniej {MIN_DLUGOSC_HASLA} znaków.', 400,
+                tok, not zwolniony)
         if not hmac.compare_digest(haslo.encode('utf-8'), powtorz.encode('utf-8')):
-            return _strona_ustawienia(instancja, 'Hasła się różnią.', 400)
+            return _strona_ustawienia(instancja, 'Hasła się różnią.', 400, tok, not zwolniony)
         if not await _w_tle(ustaw_haslo, katalog, haslo):
             return web.Response(status=403, text='Hasło zostało już ustawione.')
-        bramka.rejestr('logowanie', f'ustawiono hasło z {adres}')
+        bramka.uniewaznij_token()
+        bramka.rejestr('logowanie', f'ustawiono hasło z {adres}'
+                       + (' (adres zwolniony z tokenu)' if zwolniony else ' (token startowy)'))
         return _z_ciasteczkiem(request, _przekieruj('/'), katalog)
     if _chce_html(request):
-        return _strona_ustawienia(instancja)
+        return _strona_ustawienia(instancja, token=request.query.get('token', '')[:200],
+                                  token_wymagany=not zwolniony)
     return web.Response(status=401, text='401 — hasło nieustawione: otwórz AnberFiles '
                                          'w przeglądarce i ustaw hasło.')

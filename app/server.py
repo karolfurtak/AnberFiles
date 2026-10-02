@@ -3935,6 +3935,18 @@ async def _cleanup_parts(app):
         _evlog('start', f'self-clean: usunięto {removed} niedokończonych plików')
 
 
+def _oglos_token_startowy(token: str) -> None:
+    """Jednorazowy token ekranu „Ustaw hasło" → dziennik usługi (stderr →
+    journal), z gotowym adresem. Nigdy do rejestru zdarzeń (widać go w WWW)."""
+    import socket
+    host = HOST if HOST not in ('', '0.0.0.0', '::') else socket.gethostname()
+    print(f'AnberFiles [{KONF.nazwa_instancji}]: hasło NIEUSTAWIONE — ustaw je '
+          'w przeglądarce pod adresem z jednorazowym tokenem startowym (ważny do '
+          'ustawienia hasła albo restartu usługi; zamiast nazwy hosta można użyć '
+          f'adresu Tailscale):\n  http://{host}:{PORT}'
+          f'{_LOGOWANIE.SCIEZKA_USTAWIENIA}?token={token}', file=sys.stderr, flush=True)
+
+
 def utworz_aplikacje(k):
     """Aplikacja aiohttp dla ustawień instancji k (main() i testy)."""
     global _LEKTOR_LOCK, _LEKTOR_PAUSED, _LEKTOR_SHUTDOWN, _LOGOWANIE, _BRAMKA
@@ -3943,7 +3955,10 @@ def utworz_aplikacje(k):
         # import tylko tu: konsola (basic) nie potrzebuje pliku logowanie.py
         import logowanie as _LOGOWANIE
         _LOGOWANIE.zapewnij_sekret(k.katalog_auth)   # 32 bajty, 0600, przy 1. starcie
-        _BRAMKA = _LOGOWANIE.Bramka(rejestr=_evlog)
+        _BRAMKA = _LOGOWANIE.Bramka(rejestr=_evlog, bez_tokenu=k.ustaw_haslo_bez_tokenu,
+                                    oglos=_oglos_token_startowy)
+        if not _LOGOWANIE.haslo_ustawione(k.katalog_auth):
+            _BRAMKA.zapewnij_token()                 # adres z tokenem do dziennika usługi
     # stan kolejki lektora od zera (pętla zdarzeń nowa przy każdym starcie)
     _LEKTOR_QUEUE.clear()
     _LEKTOR_BLEDY.clear()

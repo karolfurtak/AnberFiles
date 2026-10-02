@@ -130,7 +130,12 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
 - `formularz` (Jarvis) — strona logowania; poprawne hasło zapamiętuje urządzenie
   trwałym ciasteczkiem (HMAC-SHA256, 10 lat, `HttpOnly`, `SameSite=Strict`), link
   „wyloguj" w listingu. Pierwsze uruchomienie: ekran **„Ustaw hasło"** (min. 10 znaków),
-  dostępny tylko z sieci lokalnej i Tailscale. Skrót hasła (scrypt) i sekret ciasteczek:
+  dostępny tylko z sieci lokalnej i Tailscale i tylko z **jednorazowym tokenem
+  startowym**: usługa drukuje do dziennika (`journalctl -u anberfiles | grep token`)
+  gotowy adres `…/__anberfiles/ustaw-haslo?token=…`; token żyje wyłącznie w pamięci
+  procesu (restart wydaje nowy, ustawienie hasła go unieważnia), porównanie stałoczasowe.
+  `ustaw_haslo_bez_tokenu` (lista adresów/sieci CIDR, domyślnie pusta) zwalnia wskazane
+  adresy z tokenu — nie z ograniczenia do sieci prywatnych. Skrót hasła (scrypt) i sekret ciasteczek:
   `katalog_danych/auth/` (0600). `SERVER_PASS` niepotrzebny. Złe hasło: 1 s opóźnienia,
   limit 10 prób na minutę na adres. Resetu przez WWW nie ma:
   `sudo anberfiles-reset-hasla` (bez restartu usługi; wszystkie urządzenia wylogowane).
