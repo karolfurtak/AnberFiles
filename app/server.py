@@ -2007,6 +2007,23 @@ async def errlog(request, handler):
             status=500, text='500 — błąd serwera (zapisany w rejestrze /?events=1)')
 
 
+def sciezka_ukryta(sciezka: str) -> bool:
+    """Czy którykolwiek segment ścieżki adresu zaczyna się od kropki
+    (.kosz, .git, .opisy_cache, .part, .zip_tmp — i „..")."""
+    return any(seg.startswith('.') for seg in re.split(r'[/\\]', sciezka) if seg)
+
+
+@web.middleware
+async def straz_ukrytych(request, handler):
+    """C1: pliki i katalogi z kropką są ukryte w listingu — i niedostępne po
+    bezpośrednim adresie: 403 dla KAŻDEJ metody i każdego handlera plików
+    (jedno miejsce). Serwer sam takich adresów nie generuje."""
+    if sciezka_ukryta(request.path):
+        return web.Response(status=403, text='403 — pliki i katalogi zaczynające się '
+                                             'od kropki są niedostępne.')
+    return await handler(request)
+
+
 # ── Obserwacja pamięci (serwer + procesy potomne: soffice, lektor) ──────────
 # Jądro urządzeń nie ma kontrolera pamięci cgroup (MemoryMax w systemd nie
 # działa) — pamięć się obserwuje: pomiar co 60 s z /proc, szczyt i przekroczenie
@@ -4027,7 +4044,7 @@ def utworz_aplikacje(k):
     _LEKTOR_SHUTDOWN = False
     # client_max_size: ciało żądania wczytywane do pamięci (request.read/post/json)
     # — małe; wgrywanie czyta strumieniowo z własnym licznikiem (upload)
-    app = web.Application(middlewares=[errlog, auth],
+    app = web.Application(middlewares=[errlog, auth, straz_ukrytych],
                           client_max_size=LIMIT_CIALA_ZADANIA)
     app.on_response_prepare.append(_naglowki_bezpieczenstwa)   # CSP itd. (A3, C5)
     global _PAMIEC

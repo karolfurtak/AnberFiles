@@ -77,6 +77,8 @@ ale serwuje dowolne drzewo katalogów.
   tylko do sieci prywatnych!; przy `haslo_wymagane = tak` pusty `SERVER_PASS`
   zatrzymuje start)
 - guard na path traversal (żądania nie wyjdą poza katalog główny)
+- pliki i katalogi z kropką (`.kosz`, `.git`, `.opisy_cache`, `.part`) — ukryte w listingu
+  i niedostępne po bezpośrednim adresie: 403 dla każdej metody (jeden strażnik w pośredniku)
 
 ## Wymagania
 

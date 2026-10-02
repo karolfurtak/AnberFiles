@@ -105,3 +105,62 @@ def test_eksport_konfiguracja_szablonu_z_nazwa_z_listy(tmp_path):
     st, _ = _eksport(k)
     assert st == 200
     assert (eksport / 'export_inny.uruchomiony').exists()
+
+
+# ── C1: pliki i katalogi z kropką ────────────────────────────────────────────
+
+def _ukryte(tmp_path):
+    korzen = tmp_path / 'sprawozdania'
+    (korzen / '.kosz').mkdir(parents=True, exist_ok=True)
+    (korzen / '.kosz' / 'usuniety.txt').write_text('usunięte', encoding='utf-8')
+    (korzen / 'x' / '.git').mkdir(parents=True)
+    (korzen / 'x' / '.git' / 'config').write_text('[core]', encoding='utf-8')
+    (korzen / 'x' / 'jawny.txt').write_text('jawny', encoding='utf-8')
+    (korzen / 'x' / '.ukryty.txt').write_text('ukryty', encoding='utf-8')
+    return korzen
+
+
+@pytest.mark.parametrize('adres', ['/.kosz/', '/.kosz/usuniety.txt', '/x/.git/config',
+                                   '/x/.ukryty.txt', '/x/.git/config?dl=1',
+                                   '/x/.git/?zip=1', '/x/%2Egit/config'])
+def test_kropka_w_sciezce_403(tmp_path, adres):
+    from yarl import URL
+    _ukryte(tmp_path)
+    k = _anbernic(tmp_path)
+
+    async def sc(cl):
+        r = await cl.get(URL(adres, encoded=True), auth=AU)
+        return r.status, await r.read()
+    st, tresc = uruchom(k, sc)
+    assert st == 403, (adres, st)
+    assert b'[core]' not in tresc and 'usunięte'.encode() not in tresc
+
+
+@pytest.mark.parametrize('metoda,adres', [
+    ('POST', '/x/.ukryty.txt?rename=widoczny.txt'),
+    ('DELETE', '/x/.ukryty.txt'),
+    ('POST', '/x/.git/?mkdir=nowy'),
+    ('POST', '/x/.ukryty.txt?lektor=1')])
+def test_kropka_w_sciezce_403_zapis(tmp_path, metoda, adres):
+    korzen = _ukryte(tmp_path)
+    k = _anbernic(tmp_path)
+
+    async def sc(cl):
+        return (await cl.request(metoda, adres, auth=AU)).status
+    assert uruchom(k, sc) == 403
+    assert (korzen / 'x' / '.ukryty.txt').exists()
+    assert not (korzen / 'x' / '.git' / 'nowy').exists()
+
+
+def test_zwykly_plik_200(tmp_path):
+    """Kontrola rozróżniająca: zwykły plik i katalog obok ukrytych — 200."""
+    _ukryte(tmp_path)
+    k = _anbernic(tmp_path)
+
+    async def sc(cl):
+        a = await cl.get('/x/jawny.txt', auth=AU)
+        b = await cl.get('/x/', auth=AU)
+        return a.status, await a.text(), b.status, await b.text()
+    st_a, tresc, st_b, lst = uruchom(k, sc)
+    assert st_a == 200 and tresc == 'jawny'
+    assert st_b == 200 and 'jawny.txt' in lst and '.ukryty' not in lst
