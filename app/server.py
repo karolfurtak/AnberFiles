@@ -2764,12 +2764,16 @@ class _OdczytKatalogu(Exception):
 
 
 def _proba_katalogu(p):
-    """Próba odczytu: scandir + stat() każdego wpisu (to, co zrobi listing)."""
+    """Próba odczytu: scandir + stat() każdego wpisu (to, co zrobi listing).
+    503 tylko gdy nie da się otworzyć/iterować SAMEGO katalogu."""
     with os.scandir(p) as it:
         for e in it:
             try:
                 e.stat()
-            except FileNotFoundError:        # wpis zniknął / zerwany symlink
+            except OSError:
+                # błąd pojedynczego wpisu (zerwany symlink, EPERM na sshfs)
+                # nie unieważnia katalogu — listing pomija go sam; zawieszony
+                # stat() nadal liczy się do limitu czasu (504)
                 continue
 
 

@@ -6,6 +6,7 @@ Testy budują własne katalogi w tmp_path."""
 import asyncio
 import dataclasses
 import errno
+import os
 import time
 
 import aiohttp
@@ -195,3 +196,63 @@ def test_zawieszone_rozwiazywanie_sciezki_tez_ma_limit(tmp_path, monkeypatch):
         return r.status, time.monotonic() - t0
     st, czas = uruchom(k, sc)
     assert st == 504 and czas < 1.3
+
+
+# ── błąd stat() pojedynczego wpisu nie unieważnia katalogu ───────────────────
+
+def test_wiszace_dowiazanie_nie_blokuje_listingu(tmp_path):
+    root = _drzewo(tmp_path)
+    try:
+        (root / 'maly' / 'wiszacy').symlink_to(root / 'maly' / 'nie-ma-takiego')
+    except (OSError, NotImplementedError):
+        pytest.skip('brak uprawnień do tworzenia dowiązań symbolicznych')
+    k = _konf(tmp_path)
+
+    async def sc(cl):
+        r = await cl.get('/maly/', auth=AU)
+        return r.status, await r.text()
+    st, html = uruchom(k, sc)
+    assert st == 200 and 'plik.txt' in html
+
+
+def test_blad_stat_jednego_wpisu_nie_daje_503(tmp_path, monkeypatch):
+    import server
+    root = _drzewo(tmp_path)
+    (root / 'maly' / 'zly.so').write_text('x', encoding='utf-8')
+    k = _konf(tmp_path)
+    prawdziwy_scandir = os.scandir
+
+    class _Wpis:
+        def __init__(self, e):
+            self._e = e
+            self.name = e.name
+
+        def stat(self, *a, **kw):
+            if self.name == 'zly.so':
+                raise PermissionError(errno.EPERM, 'Operation not permitted')
+            return self._e.stat(*a, **kw)
+
+        def __getattr__(self, n):
+            return getattr(self._e, n)
+
+    class _Skan:
+        def __init__(self, p):
+            self._s = prawdziwy_scandir(p)
+
+        def __enter__(self):
+            self._s.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._s.__exit__(*a)
+
+        def __iter__(self):
+            return (_Wpis(e) for e in self._s)
+
+    monkeypatch.setattr(server.os, 'scandir', lambda p: _Skan(p))
+
+    async def sc(cl):
+        r = await cl.get('/maly/', auth=AU)
+        return r.status, await r.text()
+    st, html = uruchom(k, sc)
+    assert st == 200 and 'plik.txt' in html
