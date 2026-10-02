@@ -4,7 +4,6 @@ jako root — euid i metadane plików podajemy jako parametry."""
 import importlib.machinery
 import importlib.util
 import os
-import stat
 import subprocess
 import sys
 from types import SimpleNamespace

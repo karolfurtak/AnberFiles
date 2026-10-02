@@ -2,10 +2,8 @@
 poleceń z niezaufanego dokumentu (ustalenie B6 audytu bezpieczeństwa).
 Atrapa `claude` zapisuje argumenty i treść plików, na które wskazują."""
 import json
-import os
 import stat
 import sys
-from pathlib import Path
 
 import pytest
 
