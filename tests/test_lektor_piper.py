@@ -4,6 +4,7 @@ Testy budują własne pliki w tmp_path i własną atrapę usługi Piper
 (http.server w wątku, stałe PCM). Żadnej sieci zewnętrznej, żadnego urządzenia.
 """
 import json
+import re
 import shutil
 import sys
 import threading
@@ -244,14 +245,16 @@ class _AtrapaEdge:
             yield {'type': 'audio', 'data': b'ID3' + bytes(32)}
 
 
-def test_bez_silnika_sciezka_edge_bez_sieci(lektor, monkeypatch):
+def test_jawny_edge_bez_sieci_nie_wola_pipera(lektor, monkeypatch):
+    """`silnik = edge` w ustawieniach: ani sprawdzenia, ani syntezy Pipera.
+    (Brak linii `silnik` sprawdza usługę Piper — testy niżej.)"""
     _AtrapaEdge.wywolania = []
     monkeypatch.setattr(czytaj_tts, 'edge_tts', _AtrapaEdge)
 
     def zakaz(*a, **kw):
         raise AssertionError('ścieżka edge nie może wołać usługi Piper')
     monkeypatch.setattr(czytaj_tts.urllib.request, 'urlopen', zakaz)
-    out = lektor([], wyjscie='raport_lektor.mp3')
+    out = lektor(['silnik = edge'], wyjscie='raport_lektor.mp3')
     assert out.exists() and out.read_bytes().startswith(b'ID3')
     assert len(_AtrapaEdge.wywolania) >= 1
     assert _AtrapaEdge.wywolania[0][0] == czytaj_tts.VOICES['marek']
@@ -339,3 +342,68 @@ def test_cues_z_samych_granic_slow():
     c = czytaj_tts._cues_z_granic(zd, 'Ala ma kota. Kot ma Alę.', 10.0)
     assert [x['text'] for x in c] == ['Ala ma kota.', 'Kot ma Alę.']
     assert c[0]['t'] == 10.0 and c[1]['t'] == pytest.approx(10.6)
+
+
+# ── domyślny silnik: lokalny Piper, gdy odpowiada (audyt B8, prywatność) ────
+
+def test_bez_silnika_piper_dostepny_to_piper(lektor, monkeypatch):
+    """Brak linii `silnik`, usługa Piper odpowiada → tekst zostaje na urządzeniu."""
+    _AtrapaEdge.wywolania = []
+    monkeypatch.setattr(czytaj_tts, 'edge_tts', _AtrapaEdge)
+    with AtrapaPiper() as p:
+        out = lektor([f'piper_adres = {p.adres}'])
+    assert len(p.zdania) == 3 and out.exists()
+    assert _AtrapaEdge.wywolania == []
+
+
+def test_bez_silnika_piper_niedostepny_to_edge(lektor, monkeypatch, capsys):
+    """Kontrola rozróżniająca: ta sama konfiguracja, usługa nie odpowiada → edge
+    (konsola Anbernic bez zmian) i ostrzeżenie o wysyłce tekstu."""
+    _AtrapaEdge.wywolania = []
+    monkeypatch.setattr(czytaj_tts, 'edge_tts', _AtrapaEdge)
+    out = lektor([f'piper_adres = {_wolny_adres()}'], wyjscie='raport_lektor.mp3')
+    assert out.exists() and _AtrapaEdge.wywolania
+    assert 'tekst opuszcza urządzenie (usługa Microsoft)' in capsys.readouterr().err
+
+
+def test_jawny_silnik_edge_przy_dostepnym_piper(lektor, monkeypatch):
+    _AtrapaEdge.wywolania = []
+    monkeypatch.setattr(czytaj_tts, 'edge_tts', _AtrapaEdge)
+    with AtrapaPiper() as p:
+        out = lektor(['silnik = edge', f'piper_adres = {p.adres}'],
+                     wyjscie='raport_lektor.mp3')
+    assert out.exists() and _AtrapaEdge.wywolania
+    assert p.zdania == []
+
+
+@pytest.mark.parametrize('conf,dostepny,oczek', [
+    ({}, True, 'piper'), ({}, False, 'edge'), ({'silnik': 'edge'}, True, 'edge'),
+    ({'silnik': 'piper'}, False, 'piper'), ({'silnik': 'xyz'}, True, 'edge')])
+def test_wybor_silnika(conf, dostepny, oczek):
+    assert czytaj_tts.wybierz_silnik(None, conf, piper_dostepny=lambda a: dostepny) == oczek
+    assert czytaj_tts.wybierz_silnik('edge', conf, piper_dostepny=lambda a: True) == 'edge'
+
+
+@pytest.mark.parametrize('linia,napis', [
+    ('silnik = edge', 'Silnik edge: tekst opuszcza urządzenie (usługa Microsoft).'),
+    ('', 'inaczej edge — wtedy tekst opuszcza urządzenie (usługa Microsoft).'),
+    ('silnik = piper', None)])
+def test_okno_lektora_ostrzega_o_silniku_edge(tmp_path, linia, napis):
+    import json as _json
+    import aiohttp
+    from conftest import HASLO, uruchom, wczytaj, zbuduj_anbernic
+    k = wczytaj(zbuduj_anbernic(tmp_path))
+    (k.katalog_eksportu / 'lektor-ustawienia.conf').write_text(
+        f'format = mp3\n{linia}\n', encoding='utf-8')
+    (k.katalog_glowny / 'a.md').write_text('Tekst.', encoding='utf-8')
+
+    async def sc(cl):
+        r = await cl.get('/', auth=aiohttp.BasicAuth('anbernic', HASLO))
+        return await r.text()
+    html = uruchom(k, sc)
+    assert 'class="dl lek"' in html
+    if napis is None:
+        assert '_LEK_UWAGA=' not in html
+    else:
+        m = re.search(r'window\._LEK_UWAGA=(".*?");', html)
+        assert m and napis in _json.loads(m.group(1))

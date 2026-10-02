@@ -14,5 +14,8 @@ opisuj_grafiki = nie      # opisy ilustracji modelem wizyjnym wyłączone
 #                      polski pl_PL-darkman-medium — wstawki angielskie czyta polską wymową;
 #                      mp3/flac przez ffmpeg, wav bez dodatkowych programów.
 # Parametr --silnik ma pierwszeństwo. voice/rate dotyczą tylko edge (tempo Pipera ustawia usługa).
+# Bez linii „silnik": piper, gdy usługa pod piper_adres odpowiada (tekst zostaje na urządzeniu),
+# inaczej edge. Przy edge lektor zapisuje do dziennika „tekst opuszcza urządzenie
+# (usługa Microsoft)", a okno lektora w przeglądarce pokazuje ten sam napis.
 silnik         = edge
 piper_adres    = http://127.0.0.1:8123

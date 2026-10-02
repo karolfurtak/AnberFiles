@@ -1560,6 +1560,9 @@ DEL_JS = (
     'box-shadow:0 8px 30px rgba(0,0,0,.35)">'
     '<div style="font-weight:600;margin-bottom:.35em;word-break:break-all">'
     '🔊 Lektor: \'+esc(name)+\'</div>'
+    # silnik edge wysyła tekst do Microsoftu — napis z ustawień lektora (B8)
+    '\'+(window._LEK_UWAGA?\'<div class="lek-uwaga" style="color:#9a5b00;'
+    'font-size:.88em;margin-bottom:.6em">⚠ \'+esc(window._LEK_UWAGA)+\'</div>\':"")+\''
     '<div style="color:#556;font-size:.9em;margin-bottom:.7em">'
     'Format nagrania (generacja dłuższych dokumentów może potrwać '
     'kilkanaście minut):</div>\'+radios+(window._LEK_OPISY===false?"":'
@@ -2625,6 +2628,7 @@ async def serve(request):
             SORT_JS,
             DROP_JS if zapis else '',
             '' if KONF.modul('lektor_opisy_ai') else '<script>window._LEK_OPISY=false;</script>',
+            _lektor_uwaga_js() if lektor_on else '',
             DEL_JS,
             LEKTOR_BAR_JS if lektor_on else '',
             MKDIR_JS if zapis else '',
@@ -3085,18 +3089,43 @@ LEKTORQ_PAGE = (
     '</script>')
 
 
-def _lektor_fmt() -> str:
-    """Format z lektor-ustawienia.conf (mp3|wav|flac), domyślnie mp3."""
+def _lektor_conf(klucz: str) -> str:
+    """Wartość klucza z lektor-ustawienia.conf ('' = brak linii albo pliku)."""
     try:
-        for line in Path(LEKTOR_CONF).read_text().splitlines():
+        for line in Path(LEKTOR_CONF).read_text(encoding='utf-8',
+                                                errors='replace').splitlines():
             line = line.split('#', 1)[0]
             if '=' in line:
                 k, v = line.split('=', 1)
-                if k.strip() == 'format' and v.strip() in ('mp3', 'wav', 'flac'):
+                if k.strip().lower() == klucz:
                     return v.strip()
     except Exception:
         pass
-    return 'mp3'
+    return ''
+
+
+def _lektor_fmt() -> str:
+    """Format z lektor-ustawienia.conf (mp3|wav|flac), domyślnie mp3."""
+    v = _lektor_conf('format')
+    return v if v in ('mp3', 'wav', 'flac') else 'mp3'
+
+
+def _lektor_uwaga_silnika() -> str:
+    """Napis w oknie lektora: czy tekst opuszcza urządzenie. Wybór silnika
+    robi czytaj_tts.py (wybierz_silnik); serwer zna tylko ustawienie."""
+    s = _lektor_conf('silnik').lower()
+    if s == 'piper':
+        return ''
+    if s == 'edge' or s:
+        return 'Silnik edge: tekst opuszcza urządzenie (usługa Microsoft).'
+    return ('Silnik: lokalny Piper, gdy usługa działa; inaczej edge — wtedy tekst '
+            'opuszcza urządzenie (usługa Microsoft).')
+
+
+def _lektor_uwaga_js() -> str:
+    import json
+    u = _lektor_uwaga_silnika()
+    return f'<script>window._LEK_UWAGA={json.dumps(u)};</script>' if u else ''
 
 
 def _docx_to_txt(p: Path) -> Path:

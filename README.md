@@ -59,6 +59,9 @@ ale serwuje dowolne drzewo katalogów.
 - silnik: `tools/czytaj_tts.py` (edge-tts pl-PL 96 kbps + pełna polska
   normalizacja liczb/jednostek/dat/symboli; wstawki „(z ang. …)" czyta
   głos angielski) — wynik `<nazwa>_lektor.<mp3|flac|wav>`
+- silnik mowy: `silnik` w `lektor-ustawienia.conf`; bez tej linii lokalny Piper, gdy
+  jego usługa odpowiada, inaczej edge. Edge wysyła tekst do Microsoftu — okno lektora
+  pokazuje „tekst opuszcza urządzenie (usługa Microsoft)", lektor wpisuje to do dziennika
 - wybór formatu radiobuttonami; **wspólna kolejka** dla przycisku 🔊
   i zadań spoza serwera (wykrywanie po procesie)
 - **widok kolejki** (`/?lektorq=1`, link w listingu): podgląd na żywo,

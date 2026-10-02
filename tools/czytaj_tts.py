@@ -9,8 +9,11 @@ Użycie:
     python3 czytaj_tts.py plik.md [-o wyjście.mp3] [--voice marek|zofia]
                                   [--rate -10%..+30%]
 
-Silnik (`silnik` w lektor-ustawienia.conf albo --silnik; CLI > conf > edge):
-  edge  — głosy online Microsoftu (wymaga internetu), domyślny;
+Silnik (`silnik` w lektor-ustawienia.conf albo --silnik; CLI > conf > domyślny):
+  domyślny (brak linii `silnik`): piper, gdy lokalna usługa odpowiada na
+          /zdrowie, inaczej edge (konsola bez Pipera — jak dotąd);
+  edge  — głosy online Microsoftu (wymaga internetu; tekst opuszcza
+          urządzenie — ostrzeżenie na stderr);
   piper — lokalna usługa HTTP serwer_tts.py (`piper_adres`, domyślnie
           http://127.0.0.1:8123), bez internetu; zdanie po zdaniu, PCM →
           WAV (biblioteka standardowa) albo MP3/FLAC przez ffmpeg; zapisuje
@@ -616,11 +619,11 @@ def zdania(segments: list) -> list:
     return out
 
 
-def piper_zdrowie(adres: str) -> int:
+def piper_zdrowie(adres: str, timeout: float = None) -> int:
     """GET /zdrowie → sample_rate. Niegotowa / brak odpowiedzi → PiperBlad."""
     try:
         with urllib.request.urlopen(adres.rstrip('/') + '/zdrowie',
-                                    timeout=PIPER_TIMEOUT_ZDROWIE) as r:
+                                    timeout=timeout or PIPER_TIMEOUT_ZDROWIE) as r:
             j = json.loads(r.read().decode('utf-8'))
         if j.get('gotowy') and int(j.get('sample_rate', 0)) > 0:
             return int(j['sample_rate'])
@@ -628,6 +631,29 @@ def piper_zdrowie(adres: str) -> int:
     except Exception as e:
         powod = f'{type(e).__name__}: {e}'
     raise PiperBlad(f'usługa Piper niedostępna pod {adres} ({powod})')
+
+
+PIPER_TIMEOUT_WYBORU = 3    # s, sprawdzenie dostępności przy wyborze silnika
+
+
+def _piper_odpowiada(adres: str) -> bool:
+    try:
+        piper_zdrowie(adres, timeout=PIPER_TIMEOUT_WYBORU)
+        return True
+    except PiperBlad:
+        return False
+
+
+def wybierz_silnik(cli, cfg: dict, piper_dostepny=_piper_odpowiada) -> str:
+    """CLI > `silnik` z conf > domyślny: piper, gdy lokalna usługa odpowiada
+    (tekst zostaje na urządzeniu), inaczej edge. Nieznana wartość → edge."""
+    if cli:
+        return cli
+    s = cfg.get('silnik', '').strip().lower()
+    if s:
+        return s if s in ('edge', 'piper') else 'edge'
+    adres = cfg.get('piper_adres', '') or PIPER_ADRES_DOMYSLNY
+    return 'piper' if piper_dostepny(adres) else 'edge'
 
 
 def _piper_zdanie(adres: str, tekst: str) -> bytes:
@@ -818,9 +844,10 @@ def main():
     if voice not in VOICES:
         voice = 'marek'
     rate = a.rate or cfg.get('rate', '+0%')
-    silnik = a.silnik or cfg.get('silnik', 'edge')
-    if silnik not in ('edge', 'piper'):
-        silnik = 'edge'
+    silnik = wybierz_silnik(a.silnik, cfg)
+    if silnik == 'edge':
+        print('Silnik: edge — tekst opuszcza urządzenie (usługa Microsoft). Lokalnie: '
+              'silnik = piper w lektor-ustawienia.conf.', file=sys.stderr, flush=True)
     piper_adres = cfg.get('piper_adres', '') or PIPER_ADRES_DOMYSLNY
     tabele = cfg.get('tabele', 'czytaj')
     naglowki = cfg.get('naglowki', 'tak')
