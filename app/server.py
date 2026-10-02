@@ -1780,8 +1780,15 @@ LEKTOR_PODGLAD_JS = (
     '<script>' + JS_ESC + JS_ZAPIS + LEKTOR_WYBOR_JS +
     '(function(){'
     'const b=document.getElementById("lekgen");if(!b)return;'
-    'const st=document.getElementById("lekst"),lab=b.textContent;'
-    'function koniec(t){st.textContent=t;b.textContent=lab;delete b.dataset.busy;}'
+    'const st=document.getElementById("lekst"),pb=document.getElementById("lekpb");'
+    'const lab=b.dataset.job?(b.title.startsWith("Nagraj")?"🔊 lektor ↻":"🔊 lektor"):b.textContent;'
+    'function koniec(t){st.textContent=t;b.textContent=lab;delete b.dataset.busy;'
+    'if(pb)pb.hidden=true;}'
+    'function stan(j){if(j.state==="running"){const p=j.pct||0;'
+    'st.textContent="🔊 "+(j.chunk&&!/^0\\/0$/.test(j.chunk)?"część "+j.chunk+" · ":"")+p+"%";'
+    'if(pb){pb.value=p;pb.hidden=false;}}'
+    'else{st.textContent=j.state==="paused"?"⏸ wstrzymane":"⏳ w kolejce";'
+    'if(pb)pb.hidden=true;}}'
     'async function sledz(id,out){for(;;){'
     'await new Promise(r=>setTimeout(r,2000));let d;'
     'try{d=await(await fetch("?lektorqj=1",{cache:"no-store"})).json();}'
@@ -1790,7 +1797,8 @@ LEKTOR_PODGLAD_JS = (
     'if(!j){const bl=(d.bledy||[]).find(x=>id!=null?x.id===id:x.out===out);'
     'if(bl){koniec("❌ "+bl.blad);return;}'
     'st.textContent="✓ gotowe";location.reload();return;}'
-    'st.textContent=j.state==="running"?"🔊 "+(j.pct||0)+"%":"⏳ w kolejce";}}'
+    'stan(j);}}'
+    'if(b.dataset.job)sledz(+b.dataset.job,null);'
     'b.onclick=async e=>{e.preventDefault();if(b.dataset.busy)return;'
     'const fm=await pickFmt(decodeURIComponent(b.dataset.n));if(fm===null)return;'
     'b.dataset.busy="1";b.textContent="⏳";'
@@ -1803,7 +1811,8 @@ LEKTOR_PODGLAD_JS = (
     '+"\\n\\nDopisać ten dokument do kolejki?")){koniec("");return;}'
     'r=await afFetch(u+"&queue=1",{method:"POST"});j=await r.json().catch(()=>({}));}'
     'if(r.status===202||j.status==="duplikat"){'
-    'st.textContent=j.status==="queued"?"⏳ w kolejce":"🔊 0%";'
+    'st.textContent=j.status==="queued"?"⏳ w kolejce":(j.status==="duplikat"?'
+    '"⏳ to nagranie już powstaje":"🔊 0%");'
     'sledz(j.id!=null?j.id:null,j.out);}'
     'else{koniec("❌ "+(j.blad||j.status||("HTTP "+r.status)));}'
     '}catch(err){koniec("❌ błąd lektora");}};'
@@ -1820,9 +1829,18 @@ def _lektor_przycisk(target: Path, aud) -> str:
     q = quote(target.name)
     tytul = ('Nagraj ponownie lektorem (wybór formatu i głosu)' if aud is not None
              else 'Przeczytaj lektorem — wygeneruj nagranie (wybór formatu i głosu)')
-    return (f'<a href="#" id="lekgen" data-n="{q}" title="{tytul}">'
-            + ('🔊 lektor ↻' if aud is not None else '🔊 lektor') + '</a>'
-            '<span id="lekst" style="color:#6fce8f;font-size:.9em"></span>'
+    # 02.10 (Karol: „jeśli pomyłkowo odświeżę, znika pasek postępu"): stan
+    # zadania dla TEGO pliku jest w HTML od pierwszego wyświetlenia (F5, inne
+    # urządzenie), a skrypt śledzi je dalej do końca generowania
+    job = _lektor_zadanie_pliku(target.resolve())
+    napis, pct = _lektor_stan_tekst(job, _lektor_progress()) if job else ('', None)
+    return (f'<a href="#" id="lekgen" data-n="{q}" title="{tytul}"'
+            + (f' data-job="{job["id"]}" data-busy="1">⏳' if job else '>'
+               + ('🔊 lektor ↻' if aud is not None else '🔊 lektor')) + '</a>'
+            f'<progress id="lekpb" max="100" value="{pct or 0}"'
+            + ('' if pct is not None else ' hidden')
+            + ' style="width:7em;vertical-align:middle"></progress>'
+            f'<span id="lekst" style="color:#6fce8f;font-size:.9em">{_esc(napis)}</span>'
             f'<script>window._LEK_SILNIK={_json_do_script(_lektor_silnik())};'
             + ('' if KONF.modul('lektor_opisy_ai') else 'window._LEK_OPISY=false;')
             + '</script>' + _lektor_uwaga_js() + LEKTOR_PODGLAD_JS
@@ -3106,7 +3124,8 @@ def _lektor_save_queue():
             'paused': _LEKTOR_PAUSED,
             'shutdown': _LEKTOR_SHUTDOWN,
             'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt'],
-                      'opisy': j.get('opisy', ''), 'silnik': j.get('silnik', '')}
+                      'opisy': j.get('opisy', ''), 'silnik': j.get('silnik', ''),
+                      'plik': j.get('plik', j['src'])}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
             ensure_ascii=False))
     except Exception:
@@ -3136,10 +3155,10 @@ async def _lektor_restore(app):
                 and _ext_lektor_running():
             continue   # już generowane przez osierocony/zewnętrzny proces
         _lektor_new_job(it['src'], Path(it['out']), it['fmt'],
-                        it.get('opisy', ''), it.get('silnik', ''))
+                        it.get('opisy', ''), it.get('silnik', ''), it.get('plik'))
 
 
-def _lektor_new_job(src, out, fmt, opisy='', silnik='') -> dict:
+def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None) -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
     do następnego" przy pauzie)."""
     global _LEKTOR_SEQ, _LEKTOR_LOCK
@@ -3149,11 +3168,35 @@ def _lektor_new_job(src, out, fmt, opisy='', silnik='') -> dict:
     import time as _t
     job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
            'opisy': opisy, 'silnik': silnik, 'state': 'queued', 'cancelled': False,
-           'proc': None, 'started': _t.time()}
+           'proc': None, 'started': _t.time(), 'plik': str(plik or src)}
     _LEKTOR_QUEUE.append(job)
     _lektor_save_queue()
     asyncio.ensure_future(_lektor_run(job))
     return job
+
+
+def _lektor_zadanie_pliku(target: Path, out=None):
+    """Zadanie lektora (w kolejce albo w toku) zlecone dla pliku target albo
+    zapisujące do out; None, gdy brak. Anulowane i nieudane się nie liczą."""
+    t = str(target)
+    for j in _LEKTOR_QUEUE:
+        if j['cancelled'] or j['state'] == 'failed':
+            continue
+        if j.get('plik', j['src']) == t or (out is not None and j['out'] == str(out)):
+            return j
+    return None
+
+
+def _lektor_stan_tekst(job: dict, prog) -> tuple:
+    """(napis, procent albo None) stanu zadania — ten sam zapis co skrypt strony."""
+    if job['state'] == 'running':
+        pct = int((prog or {}).get('pct', 0) or 0)
+        czesc = (f"część {prog.get('chunk', 0)}/{prog.get('chunks', 0)} · "
+                 if prog and prog.get('chunks') else '')
+        return f'🔊 {czesc}{pct}%', pct
+    if job['state'] == 'paused':
+        return '⏸ wstrzymane', None
+    return '⏳ w kolejce', None
 
 
 def _lektor_blad(job: dict, powod: str):
@@ -3163,7 +3206,9 @@ def _lektor_blad(job: dict, powod: str):
     job['state'] = 'failed'
     job['blad'] = powod
     _LEKTOR_BLEDY.append({'id': job['id'], 'out': Path(job['out']).name,
-                          'src': _lektor_src_rel(job['src']), 'state': 'failed',
+                          'src': _lektor_src_rel(job['src']),
+                          'plik': _lektor_src_rel(job.get('plik', job['src'])),
+                          'state': 'failed',
                           'blad': powod, 'czas': _t.strftime('%Y-%m-%d %H:%M:%S')})
     del _LEKTOR_BLEDY[:-_LEKTOR_BLEDY_MAX]
     try:
@@ -3356,6 +3401,7 @@ def _lektor_queue_json() -> dict:
             continue
         e = {'id': j['id'], 'out': Path(j['out']).name,
              'src': _lektor_src_rel(j['src']),
+             'plik': _lektor_src_rel(j.get('plik', j['src'])),
              'fmt': j['fmt'], 'state': j['state']}
         if j['state'] == 'running' and prog:
             e['pct'] = prog.get('pct', 0)
@@ -3817,8 +3863,11 @@ async def lektor_item(request):
         if out_dir.name == 'processed' and (out_dir.parent / 'exports').is_dir():
             out_dir = out_dir.parent / 'exports'
     out = out_dir / f'{target.stem}_lektor.{fmt}'
-    if any(j['out'] == str(out) and not j['cancelled'] for j in _LEKTOR_QUEUE):
-        return web.json_response({'status': 'duplikat', 'out': out.name})
+    trwa = _lektor_zadanie_pliku(target, out)
+    if trwa is not None:
+        # 02.10: F5 w trakcie generowania + ponowne „🔊 lektor” nie dubluje pracy
+        return web.json_response({'status': 'duplikat', 'out': Path(trwa['out']).name,
+                                  'id': trwa['id'], 'state': trwa['state']})
     blad = _lektor_sprawdz_zapis(out)
     if blad:
         global _LEKTOR_SEQ
@@ -3845,7 +3894,7 @@ async def lektor_item(request):
     silnik = request.query.get('silnik', '')
     if silnik not in LEKTOR_SILNIKI:
         silnik = ''
-    job = _lektor_new_job(src, out, fmt, opisy, silnik)
+    job = _lektor_new_job(src, out, fmt, opisy, silnik, plik=target)
     return web.json_response(
         {'status': 'queued' if queued else 'start', 'id': job['id'],
          'out': out.name, 'position': len(_LEKTOR_QUEUE)}, status=202)

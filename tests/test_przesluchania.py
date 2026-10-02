@@ -399,3 +399,25 @@ def test_przycisk_strony_startowej_na_liscie_i_w_widoku_sluchania(tmp_path, auth
         return lista, sluchaj
     for html in uruchom(k, sc):
         assert 'class="af-start"' in html and f'href="{ORIGIN_STARTOWA}/"' in html
+
+
+def test_widok_sluchania_po_odswiezeniu_pokazuje_postep(tmp_path, auth, monkeypatch):
+    """02.10: F5 w widoku słuchania w trakcie generowania — pasek wraca."""
+    import server
+    k, v = _konf(tmp_path)
+    monkeypatch.setattr(server, '_lektor_progress',
+                        lambda: {'pct': 55, 'chunk': 2, 'chunks': 4, 'out': 'x'})
+    cel = (v / 'Zasoby' / 'MoCap' / 'plan-kamer.md').resolve()
+
+    async def sc(cl):
+        server._LEKTOR_QUEUE.append({
+            'id': 5, 'out': str(cel.with_name('plan-kamer_lektor.mp3')), 'src': str(cel),
+            'plik': str(cel), 'fmt': 'mp3', 'state': 'running', 'cancelled': False,
+            'proc': None, 'started': 0})
+        try:
+            return await (await cl.get('/vault/Zasoby/MoCap/plan-kamer.md?sluchaj=1',
+                                       auth=auth)).text()
+        finally:
+            server._LEKTOR_QUEUE.clear()
+    html = uruchom(k, sc)
+    assert 'data-job="5"' in html and 'value="55"' in html and 'część 2/4 · 55%' in html

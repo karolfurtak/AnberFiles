@@ -207,3 +207,71 @@ def test_podglad_docx_ma_przycisk_lektora(tmp_path, auth):
     d1, d2 = uruchom(k, sc)
     assert 'id="lekgen"' in d1 and 'data-n="raport.docx"' in d1
     assert 'id="lekgen"' not in d2
+
+
+# (f) F5 w trakcie generowania (zgłoszenie Karola 02.10: „jeśli pomyłkowo
+# odświeżę, znika pasek postępu") — stan zadania TEGO pliku jest w HTML od
+# pierwszego wyświetlenia, a ponowne zlecenie nie dubluje pracy.
+
+ATRAPA_WOLNA = r"""
+import argparse, time
+from pathlib import Path
+ap = argparse.ArgumentParser()
+ap.add_argument('input'); ap.add_argument('-o', '--output')
+ap.add_argument('--format'); ap.add_argument('--opisy'); ap.add_argument('--silnik')
+a = ap.parse_args()
+time.sleep(4)
+Path(a.output).write_bytes(b'ID3' + bytes(64))
+"""
+
+
+def test_po_odswiezeniu_podglad_pokazuje_postep_zadania_tego_pliku(tmp_path, auth, monkeypatch):
+    import server
+    korzen, a, b = _drzewo(tmp_path)
+    k = wczytaj(zbuduj_jarvis(tmp_path))
+    monkeypatch.setattr(server, '_lektor_progress',
+                        lambda: {'pct': 42, 'chunk': 3, 'chunks': 7, 'out': 'x'})
+
+    async def sc(cl):
+        cel = (a / 'notatka.md').resolve()
+        server._LEKTOR_QUEUE.append({
+            'id': 77, 'out': str(korzen / 'lektor' / 'notatka_lektor.mp3'),
+            'src': str(cel), 'plik': str(cel), 'fmt': 'mp3', 'state': 'running',
+            'cancelled': False, 'proc': None, 'started': 0})
+        try:
+            ten = await (await cl.get('/vault/a/notatka.md?view=1', auth=auth)).text()
+            inny = await (await cl.get('/vault/b/notatka.md?view=1', auth=auth)).text()
+            kol = await (await cl.get('/?lektorqj=1', auth=auth)).json()
+        finally:
+            server._LEKTOR_QUEUE.clear()
+        return ten, inny, kol
+    ten, inny, kol = uruchom(k, sc)
+    assert 'data-job="77"' in ten
+    assert '<progress id="lekpb" max="100" value="42"' in ten
+    assert 'część 3/7 · 42%' in ten
+    assert 'if(b.dataset.job)sledz(' in ten              # śledzenie rusza samo po F5
+    # plik o tej samej nazwie w innym katalogu: bez cudzego paska
+    assert 'data-job=' not in inny and 'część 3/7' not in inny
+    assert kol['jobs'][0]['plik'] == 'vault/a/notatka.md'
+
+
+def test_ponowne_zlecenie_pliku_w_toku_nie_dubluje_zadania(tmp_path, auth):
+    korzen, a, b = _drzewo(tmp_path)
+    k = wczytaj(zbuduj_jarvis(tmp_path))
+    (tmp_path / 'srv' / 'eksport' / 'czytaj_tts.py').write_text(ATRAPA_WOLNA,
+                                                                encoding='utf-8')
+
+    async def sc(cl):
+        u = '/vault/a/notatka.md?lektor=1'
+        r1 = await cl.post(u + '&fmt=mp3', auth=auth)
+        r2 = await cl.post(u + '&fmt=mp3&queue=1', auth=auth)    # F5 + ponowny klik
+        r3 = await cl.post(u + '&fmt=wav&queue=1', auth=auth)    # inny format, ten plik
+        j1, j2, j3 = await r1.json(), await r2.json(), await r3.json()
+        kol = await (await cl.get('/?lektorqj=1', auth=auth)).json()
+        await czekaj_na_lektora(cl, auth)
+        return r1.status, j1, j2, j3, kol
+    st, j1, j2, j3, kol = uruchom(k, sc)
+    assert st == 202
+    assert j2['status'] == 'duplikat' and j2['id'] == j1['id']
+    assert j3['status'] == 'duplikat' and j3['id'] == j1['id']
+    assert len(kol['jobs']) == 1
