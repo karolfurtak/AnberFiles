@@ -45,7 +45,8 @@ KLUCZE = {
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
                'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci',
                'limit_druku_na_godzine', 'strona_startowa',
-               'limit_odczytu_katalogu_s', 'wiek_nagran_dni'),
+               'limit_odczytu_katalogu_s', 'wiek_nagran_dni',
+               'lektor_auto_odswiezanie', 'puls_adres'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -112,6 +113,12 @@ class Konfiguracja:
     # nagrania lektora w katalog_lektora starsze niż tyle dni serwer usuwa
     # (sprawdzenie co godzinę + przy starcie); 0 = nagrania nie wygasają
     wiek_nagran_dni: int = 0
+    # nagrania lektora odświeżane samoczynnie po zmianie treści dokumentu (moduł
+    # odswiezanie); Anbernic: nie (domyślnie), Jarvis: tak
+    lektor_auto_odswiezanie: bool = False
+    # Puls (claude-cron) na tym samym urządzeniu: automatyczne nagrania czekają,
+    # gdy ma trwający bieg; pusty = bez sprawdzania
+    puls_adres: str = ''
     # lista „Do przesłuchania” (moduł przesluchania): katalog notatek (vault)
     # i opcjonalny plik propozycji klasyfikacji (tabela Markdown)
     przesluchania_zakres: 'Path | None' = None
@@ -371,6 +378,9 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
             'limit_odczytu_katalogu_s', s.get('limit_odczytu_katalogu_s', '3')),
         bez_drzewa=_nazwy_katalogow('bez_drzewa', k.get('bez_drzewa', '')),
         wiek_nagran_dni=_nieujemna('wiek_nagran_dni', s.get('wiek_nagran_dni', '0')),
+        lektor_auto_odswiezanie=_bool('serwer', 'lektor_auto_odswiezanie',
+                                      s.get('lektor_auto_odswiezanie', 'nie')),
+        puls_adres=_adres_http('puls_adres', s.get('puls_adres', '')),
         przesluchania_zakres=(Path(k['przesluchania_zakres'])
                               if k.get('przesluchania_zakres') else None),
         przesluchania_kandydaci=(Path(k['przesluchania_kandydaci'])

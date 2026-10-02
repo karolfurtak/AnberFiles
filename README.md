@@ -79,6 +79,16 @@ ale serwuje dowolne drzewo katalogów.
 - **wygasanie**: `wiek_nagran_dni` (`[serwer]`, domyślnie 0 = wyłączone) — nagrania
   w katalogu lektora starsze niż N dni serwer usuwa przy starcie i co godzinę,
   każde z wpisem w rejestrze; pasek podglądu pokazuje „⏳ zostało …”
+- **załącznik nieczytany**: linia `<!-- lektor: koniec -->` — od niej do końca pliku
+  lektor nie czyta (szczegóły, źródła); podgląd pokazuje całość, widok słuchania —
+  załącznik pod napisem „Dalej: załącznik — tylko do czytania”; brak znacznika = całość
+- **odświeżanie po zmianie dokumentu**: `lektor_auto_odswiezanie = tak` (`[serwer]`,
+  domyślnie nie; Jarvis: tak) — każde nagranie ma `<nazwa>_lektor.zrodlo.json`
+  (dokument, odcisk SHA-256 części czytanej bez nagłówka Obsidiana, silnik). Przy starcie
+  i co minutę serwer porównuje odcisk TYLKO dokumentów z nagraniem; inny → stare nagranie
+  „nieaktualne — nowe w przygotowaniu”, zadanie w kolejce tym samym silnikiem (bez
+  dublowania), wpis „nagranie odświeżone: … (zmiana treści)”. Zadania automatyczne
+  ustępują zleconym ręcznie i czekają, gdy Puls (`puls_adres`, `/api/status`) ma trwający bieg
 
 **Lista „Do przesłuchania” (moduł `przesluchania`, domyślnie wyłączony):**
 - `/?przesluchania=1` — notatki `.md` z `przesluchania_zakres` ze `status:` w nagłówku

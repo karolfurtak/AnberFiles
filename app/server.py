@@ -30,6 +30,7 @@ from aiohttp import web
 import konfiguracja as _konf
 import nagrania as _nagr
 import przesluchania as _prz
+import odswiezanie as _odsw
 
 try:
     import markdown as _markdown      # renderowany podgląd .md (opcjonalny)
@@ -1809,10 +1810,13 @@ LEKTOR_PODGLAD_JS = (
     'const lab=b.dataset.job?(b.title.startsWith("Nagraj")?"🔊 lektor ↻":"🔊 lektor"):b.textContent;'
     'function koniec(t){st.textContent=t;b.textContent=lab;delete b.dataset.busy;'
     'if(pb)pb.hidden=true;}'
-    'function stan(j){if(j.state==="running"){const p=j.pct||0;'
-    'st.textContent="🔊 "+(j.chunk&&!/^0\\/0$/.test(j.chunk)?"część "+j.chunk+" · ":"")+p+"%";'
+    'function stan(j){const a=j.auto?"🔄 odświeżane po zmianie dokumentu · ":"";'
+    'if(j.state==="running"){const p=j.pct||0;'
+    'st.textContent=a+"🔊 "+(j.chunk&&!/^0\\/0$/.test(j.chunk)?"część "+j.chunk+" · ":"")+p+"%";'
     'if(pb){pb.value=p;pb.hidden=false;}}'
-    'else{st.textContent=j.state==="paused"?"⏸ wstrzymane":"⏳ w kolejce";'
+    'else{st.textContent=a+(j.state==="paused"?"⏸ wstrzymane":(j.czeka==="puls"?'
+    '"⏳ czeka na koniec biegu Pulsa":(j.czeka==="reczne"?"⏳ czeka na nagrania zlecone ręcznie":'
+    '"⏳ w kolejce")));'
     'if(pb)pb.hidden=true;}}'
     'async function sledz(id,out){for(;;){'
     'await new Promise(r=>setTimeout(r,2000));let d;'
@@ -3303,7 +3307,7 @@ def _lektor_save_queue():
             'shutdown': _LEKTOR_SHUTDOWN,
             'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt'],
                       'opisy': j.get('opisy', ''), 'silnik': j.get('silnik', ''),
-                      'plik': j.get('plik', j['src'])}
+                      'plik': j.get('plik', j['src']), 'auto': bool(j.get('auto'))}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
             ensure_ascii=False))
     except Exception:
@@ -3333,12 +3337,14 @@ async def _lektor_restore(app):
                 and _ext_lektor_running():
             continue   # już generowane przez osierocony/zewnętrzny proces
         _lektor_new_job(it['src'], Path(it['out']), it['fmt'],
-                        it.get('opisy', ''), it.get('silnik', ''), it.get('plik'))
+                        it.get('opisy', ''), it.get('silnik', ''), it.get('plik'),
+                        auto=bool(it.get('auto')))
 
 
-def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None) -> dict:
+def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None, auto=False) -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
-    do następnego" przy pauzie)."""
+    do następnego" przy pauzie). auto=True: odświeżenie po zmianie dokumentu
+    (ustępuje zleconym ręcznie, czeka na koniec biegu Pulsa)."""
     global _LEKTOR_SEQ, _LEKTOR_LOCK
     if _LEKTOR_LOCK is None:
         _LEKTOR_LOCK = asyncio.Lock()
@@ -3346,7 +3352,8 @@ def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None) -> dict:
     import time as _t
     job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
            'opisy': opisy, 'silnik': silnik, 'state': 'queued', 'cancelled': False,
-           'proc': None, 'started': _t.time(), 'plik': str(plik or src)}
+           'proc': None, 'started': _t.time(), 'plik': str(plik or src),
+           'auto': bool(auto)}
     _LEKTOR_QUEUE.append(job)
     _lektor_save_queue()
     asyncio.ensure_future(_lektor_run(job))
@@ -3365,16 +3372,23 @@ def _lektor_zadanie_pliku(target: Path, out=None):
     return None
 
 
+ODSW_NAPIS = '🔄 odświeżane po zmianie dokumentu'
+ODSW_CZEKA = {'puls': '⏳ czeka na koniec biegu Pulsa',
+              'reczne': '⏳ czeka na nagrania zlecone ręcznie'}
+
+
 def _lektor_stan_tekst(job: dict, prog) -> tuple:
-    """(napis, procent albo None) stanu zadania — ten sam zapis co skrypt strony."""
+    """(napis, procent albo None) stanu zadania — ten sam zapis co skrypt strony.
+    Zadanie automatyczne (odświeżenie po zmianie dokumentu) z przedrostkiem."""
+    przed = ODSW_NAPIS + ' · ' if job.get('auto') else ''
     if job['state'] == 'running':
         pct = int((prog or {}).get('pct', 0) or 0)
         czesc = (f"część {prog.get('chunk', 0)}/{prog.get('chunks', 0)} · "
                  if prog and prog.get('chunks') else '')
-        return f'🔊 {czesc}{pct}%', pct
+        return f'{przed}🔊 {czesc}{pct}%', pct
     if job['state'] == 'paused':
-        return '⏸ wstrzymane', None
-    return '⏳ w kolejce', None
+        return f'{przed}⏸ wstrzymane', None
+    return przed + ODSW_CZEKA.get(job.get('czeka'), '⏳ w kolejce'), None
 
 
 def _lektor_blad(job: dict, powod: str):
@@ -3421,11 +3435,193 @@ def _lektor_ogon_logu(n: int = 300) -> str:
         return ''
 
 
+class _LektorRygielZdobyty:
+    """Kolejka lektora zdobyta wcześniej (acquire) — oddanie przy wyjściu."""
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *wyj):
+        _LEKTOR_LOCK.release()
+        return False
+
+
+# ── Odświeżanie nagrań po zmianie dokumentu (app/odswiezanie.py) ────────────
+# Przegląd przy starcie i co ODSW_CO_S (klon vaulta odświeża się co 15 min
+# i na wyzwalacz z laptopa — przegląd wychwyci każdą zmianę w ciągu minuty).
+# Czytane są tylko dokumenty, które MAJĄ nagranie, i tylko gdy zmienił się ich
+# czas albo rozmiar. Zadania automatyczne: jedno generowanie naraz (kolejka),
+# pierwszeństwo nagrań zleconych ręcznie, przerwa na czas biegu Pulsa.
+ODSW_CO_S = 60
+ODSW_CZEKAJ_S = 15          # odstęp sprawdzania warunków przez zadanie czekające
+PULS_LIMIT_S = 3.0
+_ODSW_PAMIEC: dict = {}     # odswiezanie.przeglad: stan dokumentów między przeglądami
+_ODSW_ZADANIE = None
+_ODSW_PULS_BLAD = {'zgloszony': False}
+
+
+def _puls_status() -> dict:
+    """Odpowiedź /api/status Pulsa (testy podstawiają); wyjątek = brak odpowiedzi."""
+    return _odsw.puls_status(KONF.puls_adres, PULS_LIMIT_S)
+
+
+async def _puls_zajety() -> bool:
+    """Trwający bieg Pulsa. Brak adresu albo brak odpowiedzi = nie da się ustalić
+    → nie blokuje (Puls nie odpowiada = nie prowadzi biegu na tym urządzeniu),
+    jeden wpis w rejestrze zdarzeń do czasu ponownej odpowiedzi."""
+    if not KONF.puls_adres:
+        return False
+    try:
+        st = await asyncio.get_running_loop().run_in_executor(None, _puls_status)
+    except Exception as e:
+        if not _ODSW_PULS_BLAD['zgloszony']:
+            _ODSW_PULS_BLAD['zgloszony'] = True
+            _evlog('lektor', f'Puls ({KONF.puls_adres}) nie odpowiada: {e} — automatyczne '
+                   'odświeżanie nagrań nie czeka na jego biegi, dopóki nie odpowie',
+                   level='error')
+        return False
+    _ODSW_PULS_BLAD['zgloszony'] = False
+    return _odsw.puls_zajety(st)
+
+
+def _lektor_reczne_czeka(job: dict) -> bool:
+    """Zadanie zlecone ręcznie czeka albo trwa (poza job)."""
+    return any(j is not job and not j.get('auto') and not j['cancelled']
+               and j['state'] != 'failed' for j in _LEKTOR_QUEUE)
+
+
+async def _odsw_powod_czekania(job: dict):
+    """'reczne' | 'puls' | None — powód, dla którego zadanie automatyczne czeka."""
+    if _lektor_reczne_czeka(job):
+        return 'reczne'
+    if await _puls_zajety():
+        return 'puls'
+    return None
+
+
+async def _odsw_czekaj(job: dict) -> bool:
+    """Zadanie automatyczne czeka na swoją kolej; False = anulowane."""
+    while True:
+        if job['cancelled']:
+            return False
+        powod = await _odsw_powod_czekania(job)
+        if powod is None:
+            job.pop('czeka', None)
+            return True
+        job['czeka'] = powod
+        await asyncio.sleep(ODSW_CZEKAJ_S)
+
+
+def _lektor_po_nagraniu(job: dict):
+    """Udane nagranie: metryka z odciskiem treści (podstawa odświeżania) i wpis
+    w rejestrze zdarzeń przy odświeżeniu automatycznym. Nigdy nie rzuca."""
+    import time as _t
+    out = Path(job['out'])
+    plik = Path(job.get('plik', job['src']))
+    try:
+        if job.get('odcisk') and out.exists():
+            _odsw.zapisz_metryke(out, _rel_root(plik), job['odcisk'],
+                                 job.get('silnik') or _lektor_silnik(),
+                                 _t.strftime('%Y-%m-%d %H:%M:%S'))
+    except OSError as e:
+        _evlog('lektor', f'metryka nagrania {out.name} nie zapisana: {e} — nagranie '
+               'nie będzie odświeżane po zmianie dokumentu', level='error')
+    _ODSW_PAMIEC.pop(str(plik), None)
+    if job.get('auto'):
+        _evlog('lektor', f'nagranie odświeżone: {_rel_root(plik)} (zmiana treści, '
+               f'odcisk {str(job.get("odcisk"))[:12]})')
+
+
+def _odsw_nieaktualne(plik: Path) -> bool:
+    w = _ODSW_PAMIEC.get(str(Path(plik)))
+    return bool(w and w.get('nieaktualne'))
+
+
+def odswiez_nagrania() -> list:
+    """Jeden przegląd: nieaktualne nagrania → zadania automatyczne w kolejce
+    (bez dublowania). Zwraca listę dodanych zadań. Wywołanie w pętli zdarzeń."""
+    if not (KONF.lektor_auto_odswiezanie and KONF.modul('lektor')
+            and KONF.katalog_lektora is not None):
+        return []
+    return _odsw_kolejkuj(_odsw.przeglad(Path(KONF.katalog_lektora), ROOT, _ODSW_PAMIEC))
+
+
+def _odsw_kolejkuj(nieaktualne: list) -> list:
+    dodane = []
+    for n in nieaktualne:
+        plik, audio = Path(n['plik']), Path(n['audio'])
+        if _lektor_zadanie_pliku(plik, audio) is not None \
+                or _lektor_zadanie_pliku(plik.resolve(), audio) is not None:
+            continue                                    # już w kolejce albo w toku
+        try:
+            src = plik
+            if plik.suffix.lower() == '.docx':
+                src = _odsw.blizniak_md(plik) or _docx_to_txt(plik)
+        except Exception as e:
+            _evlog('lektor', f'odświeżenie nagrania {_rel_root(plik)}: ekstrakcja DOCX '
+                   f'nieudana: {e}', level='error')
+            continue
+        fmt = audio.suffix.lower().lstrip('.')
+        if fmt not in ('mp3', 'wav', 'flac'):
+            fmt = 'mp3'
+        silnik = n.get('silnik') if n.get('silnik') in LEKTOR_SILNIKI else 'piper'
+        job = _lektor_new_job(src, audio.with_suffix('.' + fmt), fmt, 'nie', silnik,
+                              plik=plik, auto=True)
+        _evlog('lektor', f'nagranie nieaktualne: {_rel_root(plik)} ({n["powod"]}; odcisk '
+               f'{(n.get("stary") or "brak")[:12]} → {n["nowy"][:12]}) — stare nagranie '
+               f'zostaje do czasu zastąpienia, nowe w kolejce (silnik {silnik}, '
+               f'zadanie {job["id"]})')
+        dodane.append(job)
+    return dodane
+
+
+async def _odsw_petla():
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            nieakt = await loop.run_in_executor(
+                None, _odsw.przeglad, Path(KONF.katalog_lektora), ROOT, _ODSW_PAMIEC)
+            _odsw_kolejkuj(nieakt)
+        except Exception as e:                      # pętla nie może umrzeć po cichu
+            _evlog('lektor', f'przegląd nagrań do odświeżenia: {e}', level='error')
+        await asyncio.sleep(ODSW_CO_S)
+
+
+async def _odsw_start(app):
+    global _ODSW_ZADANIE
+    _ODSW_PAMIEC.clear()
+    if (KONF.lektor_auto_odswiezanie and KONF.modul('lektor')
+            and KONF.katalog_lektora is not None):
+        _ODSW_ZADANIE = asyncio.ensure_future(_odsw_petla())
+
+
+async def _odsw_stop(app):
+    global _ODSW_ZADANIE
+    if _ODSW_ZADANIE is not None:
+        _ODSW_ZADANIE.cancel()
+        _ODSW_ZADANIE = None
+
+
 async def _lektor_run(job: dict):
     out = Path(job['out'])
     shutdown = False
     try:
-        async with _LEKTOR_LOCK:
+        # zadanie automatyczne ustępuje zleconym ręcznie i biegowi Pulsa — także
+        # po zdobyciu kolejki (rygiel oddany, czeka dalej)
+        while True:
+            if job.get('auto') and not await _odsw_czekaj(job):
+                return
+            await _LEKTOR_LOCK.acquire()
+            try:
+                ustap = (job.get('auto') and not job['cancelled']
+                         and await _odsw_powod_czekania(job))
+            except BaseException:
+                _LEKTOR_LOCK.release()
+                raise
+            if ustap:
+                _LEKTOR_LOCK.release()
+                continue
+            break
+        async with _LektorRygielZdobyty():
             if job['cancelled']:
                 return
             # czekaj: pauza kolejki ORAZ lektor spoza serwera (agent/CLI)
@@ -3434,8 +3630,15 @@ async def _lektor_run(job: dict):
                 if job['cancelled']:
                     return
             job['state'] = 'running'
+            job.pop('czeka', None)
             import time as _t
             job['started'] = _t.time()
+            # odcisk treści czytanej TERAZ — zmiana w trakcie generowania wyjdzie
+            # w następnym przeglądzie (inny odcisk niż w metryce)
+            try:
+                job['odcisk'] = _odsw.odcisk_dokumentu(Path(job.get('plik', job['src'])))
+            except OSError:
+                job['odcisk'] = None
             blad = _lektor_sprawdz_zapis(out)
             if blad:
                 _lektor_blad(job, blad)
@@ -3460,6 +3663,8 @@ async def _lektor_run(job: dict):
             if proc.returncode not in (0, None) and not job['cancelled']:
                 _lektor_blad(job, f'czytaj_tts.py zakończył się kodem '
                                   f'{proc.returncode}: {_lektor_ogon_logu()}')
+            elif proc.returncode == 0 and not job['cancelled']:
+                _lektor_po_nagraniu(job)
             if job['cancelled']:
                 # przerwane — sprzątnij TYLKO pliki powstałe w trakcie
                 # TEGO zadania (mtime > start)
@@ -3580,7 +3785,8 @@ def _lektor_queue_json() -> dict:
         e = {'id': j['id'], 'out': Path(j['out']).name,
              'src': _lektor_src_rel(j['src']),
              'plik': _lektor_src_rel(j.get('plik', j['src'])),
-             'fmt': j['fmt'], 'state': j['state']}
+             'fmt': j['fmt'], 'state': j['state'], 'auto': bool(j.get('auto')),
+             'czeka': j.get('czeka', '')}
         if j['state'] == 'running' and prog:
             e['pct'] = prog.get('pct', 0)
             e['chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
@@ -4015,12 +4221,8 @@ async def lektor_item(request):
     # ten katalog lub ../processed/) albo ekstrakcja tekstu z DOCX
     src = target
     if ext == '.docx':
-        for cand in (target.parent / (target.stem + '.md'),
-                     target.parent.parent / 'processed' / (target.stem + '.md')):
-            if cand.exists():
-                src = cand
-                break
-        else:
+        src = _odsw.blizniak_md(target)
+        if src is None:
             try:
                 src = _docx_to_txt(target)
             except Exception as e:
@@ -4719,7 +4921,10 @@ def _prz_stan_nagrania(w: dict, prog) -> dict:
     job = _lektor_zadanie_pliku(plik.resolve()) if KONF.modul('lektor') else None
     if job is not None:
         napis, pct = _lektor_stan_tekst(job, prog)
-        return {'rodzaj': 'trwa', 'napis': napis, 'pct': pct, 'job': job['id']}
+        stare = ('stare nagranie: nieaktualne — nowe w przygotowaniu'
+                 if job.get('auto') and w.get('nagranie_plik') is not None else '')
+        return {'rodzaj': 'trwa', 'napis': napis, 'pct': pct, 'job': job['id'],
+                'stare': stare}
     aud = w.get('nagranie_plik')
     if aud is not None:
         czas = _nagr.opis_czasu(_nagr.czas_trwania_s(aud))
@@ -4729,7 +4934,9 @@ def _prz_stan_nagrania(w: dict, prog) -> dict:
             zostalo = ''
         return {'rodzaj': 'gotowe',
                 'napis': '🔊 gotowe' + (f' · {czas}' if czas else '')
-                         + (f' · zniknie za {zostalo}' if zostalo else '')}
+                         + (f' · zniknie za {zostalo}' if zostalo else '')
+                         + (' · ⚠ nieaktualne (dokument zmieniony)'
+                            if _odsw_nieaktualne(plik) else '')}
     rel = _rel_root(plik)
     bl = next((b for b in reversed(_LEKTOR_BLEDY) if b.get('plik') == rel), None)
     if bl is not None:
@@ -4952,9 +5159,12 @@ PRZ_LEKTOR_JS = (
     'const el=[...document.querySelectorAll(".lek[data-job]")];if(!el.length)return;'
     'for(const e of el){const j=(d.jobs||[]).find(x=>x.id===+e.dataset.job);'
     'if(!j){location.reload();return;}'
-    'if(j.state==="running"){const p=j.pct||0;stan(e,"🔊 "+(j.chunk&&!/^0\\/0$/.test(j.chunk)'
+    'const a=j.auto?"🔄 odświeżane po zmianie dokumentu · ":"";'
+    'if(j.state==="running"){const p=j.pct||0;stan(e,a+"🔊 "+(j.chunk&&!/^0\\/0$/.test(j.chunk)'
     '?"część "+j.chunk+" · ":"")+p+"%",p);}'
-    'else stan(e,j.state==="paused"?"⏸ wstrzymane":"⏳ w kolejce",null);}}}'
+    'else stan(e,a+(j.state==="paused"?"⏸ wstrzymane":(j.czeka==="puls"?'
+    '"⏳ czeka na koniec biegu Pulsa":(j.czeka==="reczne"?"⏳ czeka na nagrania zlecone ręcznie":'
+    '"⏳ w kolejce"))),null);}}}'
     'document.querySelectorAll(".lek button.gen").forEach(b=>b.onclick=async ev=>{'
     'ev.preventDefault();const fm=await pickFmt(b.dataset.n);if(fm===null)return;'
     'const el=b.closest(".lek");b.disabled=true;'
@@ -5009,6 +5219,8 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
             lek = (f'<div class="lek {sn["rodzaj"]}" data-p="{_esc(_rel_root(w["plik"]))}"'
                    + (f' data-job="{sn["job"]}"' if sn.get('job') else '') + '>'
                    f'<span class="lst-st">{_esc(sn["napis"])}</span>'
+                   + (f'<span class="lst-stare" style="display:block;color:#e0a33a;'
+                      f'font-size:.85em">{_esc(sn["stare"])}</span>' if sn.get('stare') else '')
                    + (f'<progress max="100" value="{sn["pct"]}"></progress>'
                       if sn.get('pct') is not None else '')
                    + (f'<button class="gen" data-u="{w["url"]}" '
@@ -5127,14 +5339,28 @@ def render_sluchaj_page(target: Path, wiersz: dict) -> str:
     aud = _lektor_audio_for(target, exports=True)
     cue = _lektor_cues_for(target, aud) if aud is not None else None
     times_js = '[]'
+    # 02.10: od znacznika <!-- lektor: koniec --> załącznik tylko do czytania —
+    # zdania podświetlane obejmują część czytaną, załącznik pod napisem
+    czytana, zalacznik = _odsw.podziel_na_zalacznik(_prz.tresc_bez_naglowka(src))
+
+    def _md(t):
+        return (_fix_md_imgs(_md_render(t), target.parent) if _markdown is not None
+                else f'<pre>{_esc(t)}</pre>')
     if cue is not None:
         body, times_js, n = _zdania_lektora(cue)
         opis = f'📖 {n} zdań'
     else:
-        tresc = _prz.tresc_bez_naglowka(src)
-        body = (_fix_md_imgs(_md_render(tresc), target.parent) if _markdown is not None
-                else f'<pre>{_esc(tresc)}</pre>')
+        body = _md(czytana)
         opis = '🔊 brak nagrania — dotknij „🔊 lektor”' if aud is None else '🔊 nagranie bez czasów zdań'
+    if zalacznik is not None:
+        body += ('<div class="zal-lek" style="margin:1.5em 0 .5em;padding:.4em .6em;'
+                 'border-top:1px solid #3a3f4b;color:#e0a33a;font-weight:600">'
+                 'Dalej: załącznik — tylko do czytania</div>' + _md(zalacznik))
+    zad = _lektor_zadanie_pliku(target.resolve()) if aud is not None else None
+    if zad is not None and zad.get('auto'):
+        opis = '⚠ nagranie nieaktualne — nowe w przygotowaniu · ' + opis
+    elif aud is not None and _odsw_nieaktualne(target):
+        opis = '⚠ nagranie nieaktualne (dokument zmieniony) · ' + opis
     audio_html = (f'<audio id="au" controls preload="metadata" src="{_url_abs(aud)}"></audio>'
                   if aud is not None else '')
     ost = wiersz.get('ostatnia')
@@ -5582,6 +5808,8 @@ def utworz_aplikacje(k):
     app.on_startup.append(_pamiec_start)
     app.on_startup.append(_soffice_start)          # piaskownica sieci soffice (C9)
     app.on_startup.append(_wygasanie_start)        # nagrania lektora po N dniach
+    app.on_startup.append(_odsw_start)             # odświeżanie nagrań po zmianie dokumentu
+    app.on_cleanup.append(_odsw_stop)
     app.on_cleanup.append(_wygasanie_stop)
     app.on_cleanup.append(_pamiec_stop)
     app.on_cleanup.append(_dziennik_stop)

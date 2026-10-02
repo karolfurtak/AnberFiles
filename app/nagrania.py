@@ -6,7 +6,8 @@ i testów. Bez zależności spoza biblioteki standardowej.
 
 Nagranie lektora = plik `<nazwa>_lektor.<rozszerzenie audio>`; obok mogą leżeć
 `<nazwa>_lektor.cues.json` (czasy zdań dla ?read=1) i `<nazwa>_lektor.chapters.json`
-(rozdziały) — usuwane razem z nagraniem, bo bez niego nie mają sensu.
+(rozdziały) i `<nazwa>_lektor.zrodlo.json` (odcisk treści dokumentu — moduł
+odswiezanie) — usuwane razem z nagraniem, bo bez niego nie mają sensu.
 """
 import os
 import time
@@ -15,7 +16,7 @@ from pathlib import Path
 # Preferowana kolejność: FLAC > MP3 > ... (serwer szuka nagrania w tej kolejności)
 AUDIO_EXT = ('.flac', '.mp3', '.wav', '.ogg', '.m4a', '.opus')
 PRZYROSTEK = '_lektor'
-TOWARZYSZACE = ('.cues.json', '.chapters.json')
+TOWARZYSZACE = ('.cues.json', '.chapters.json', '.zrodlo.json')
 SEKUND_NA_DOBE = 86400
 
 

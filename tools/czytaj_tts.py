@@ -157,6 +157,19 @@ MONTHS = ['', 'stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca',
           'lipca', 'sierpnia', 'września', 'października', 'listopada', 'grudnia']
 
 
+# Znacznik końca części czytanej (Karol 02.10: szczegóły i źródła w załączniku
+# na końcu, którego lektor NIE czyta). Od linii znacznika do końca pliku tekst
+# jest pomijany; brak znacznika = całość. Ta sama reguła w app/odswiezanie.py
+# (odcisk treści) — zgodność pilnuje test_lektor_znacznik_koniec.py.
+ZNACZNIK_KONCA = re.compile(r'(?im)^[ \t]*<!--[ \t]*lektor:[ \t]*koniec[ \t]*-->[ \t]*$')
+
+
+def czesc_czytana(text: str) -> str:
+    """Tekst do linii `<!-- lektor: koniec -->` (bez niej); brak znacznika = całość."""
+    m = ZNACZNIK_KONCA.search(text)
+    return text if m is None else text[:m.start()]
+
+
 def normalize(text: str, tabele: str = 'czytaj', naglowki: str = 'tak') -> str:
     """Markdown → tekst do czytania, liczby/jednostki/symbole słownie.
     tabele: 'czytaj' (wiersz po wierszu) | 'pomijaj' (wtrącenie).
@@ -889,7 +902,7 @@ def main():
     _zapisz_pid()
     import atexit
     atexit.register(_usun_pid)
-    raw = src.read_text(encoding='utf-8', errors='replace')
+    raw = czesc_czytana(src.read_text(encoding='utf-8', errors='replace'))
     # opisy ilustracji (model wizyjny) — PRZED normalizacją, żeby opis
     # przeszedł przez pełną normalizację liczb/jednostek jak zwykły tekst
     if a.opisy is not None:

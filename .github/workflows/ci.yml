@@ -16,7 +16,7 @@ jobs:
       - name: Audyt zależności (znane podatności)
         run: pip-audit -r requirements.txt --require-hashes --disable-pip --progress-spinner off
       - run: ruff check --select E9,F app/ tools/ tests/ narzedzia/anberfiles-reset-hasla
-      - run: python -m py_compile app/server.py app/konfiguracja.py app/logowanie.py app/przesluchania.py app/nagrania.py tools/czytaj_tts.py tools/czas_z_gita.py narzedzia/anberfiles-reset-hasla
+      - run: python -m py_compile app/server.py app/konfiguracja.py app/logowanie.py app/przesluchania.py app/nagrania.py app/odswiezanie.py tools/czytaj_tts.py tools/czas_z_gita.py narzedzia/anberfiles-reset-hasla
       - name: Składnia skryptów sh
         run: for f in narzedzia/anberfiles-kopia-plikow narzedzia/anberfiles-odswiez; do sh -n "$f"; done
 

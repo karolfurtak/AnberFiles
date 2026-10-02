@@ -52,6 +52,14 @@ limit_odczytu_katalogu_s = 3
 # Nagrania lektora w katalog_lektora starsze niż tyle dni serwer usuwa sam (sprawdzenie przy starcie
 # i co godzinę; wpis w rejestrze zdarzeń). Usunięte nagranie można wygenerować ponownie. 0 = nie wygasają.
 wiek_nagran_dni = 3
+# Nagrania lektora odświeżane samoczynnie po zmianie dokumentu: przy starcie i co minutę serwer
+# porównuje odcisk SHA-256 treści dokumentu z odciskiem zapisanym przy nagraniu
+# (<nazwa>_lektor.zrodlo.json) — tylko dla dokumentów, które MAJĄ nagranie. Inny odcisk → nagranie
+# „nieaktualne — nowe w przygotowaniu” i zadanie w kolejce lektora tym samym silnikiem (domyślnie
+# piper). Automatyczne nagrania ustępują zleconym ręcznie i czekają, gdy Puls (puls_adres) ma
+# trwający bieg. Domyślnie nie (Anbernic); na Jarvisie: tak (/etc/anberfiles/jarvis.conf).
+lektor_auto_odswiezanie = nie
+puls_adres      = http://localhost:7777   ; /api/status Pulsa; puste = bez sprawdzania
 
 [katalogi]
 katalog_glowny   = /srv/anberfiles/korzen
