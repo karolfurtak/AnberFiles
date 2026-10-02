@@ -7,7 +7,7 @@ instancji wskazany zmienną ANBERFILES_CONF; brak zmiennej = ustawienia konsoli
 Anbernic). Zmienne środowiska nadal działają i wygrywają z plikiem:
     SERVER_PORT, SERVER_USER, SERVER_HOST; hasło wyłącznie SERVER_PASS.
 
-Listing katalogu = sortowalna tabela (Nazwa, Rozmiar, Modyfikacja, Utworzono).
+Listing katalogu = sortowalna tabela (Nazwa, Rozmiar, Modyfikacja, Powstanie).
 Kliknięcie nagłówka kolumny sortuje (rozmiar i daty sortowane numerycznie).
 """
 import os
@@ -1576,7 +1576,7 @@ STYLE = (
     '@media (max-width:700px){'
     'body{margin:.6em auto;padding:0 .5em}'
     'a.del,a.ren,a.cpy{display:none}'
-    'th:nth-child(4),td:nth-child(4){display:none}'   # kolumna Utworzono
+    'th:nth-child(4),td:nth-child(4){display:none}'   # kolumna Powstanie
     'th,td{padding:.85em .55em;font-size:1.02em}'
     '.dl{font-size:1.35em;padding:.15em .25em;margin-right:.4em}'
     'h2{font-size:1.05em}'
@@ -2465,6 +2465,105 @@ def _fmt_size(s):
     return f'{s} B'
 
 
+# ── Daty plików: bufor z historii git i czas powstania z systemu plików ──────
+# Klony git (vault, wykonawca): tools/czas_z_gita.py po każdym odświeżeniu
+# zapisuje <katalog_danych>/czasy-git/<nazwa klonu>.json — zmiana treści
+# (bez czystych przeniesień) i powstanie (najstarsze dodanie, przez zmiany
+# nazwy). Lista czyta bufor (pamięć zależna od czasu modyfikacji pliku).
+# Poza gitem: czas powstania z systemu plików (statx na Linuksie); gdy system
+# go nie podaje — czas modyfikacji z adnotacją „≈".
+_BUFORY_GIT = {}
+
+
+def _korzen_gita(katalog: Path):
+    """Katalog klonu git (z .git) zawierający katalog, w obrębie ROOT; None = brak."""
+    p = katalog
+    while True:
+        try:
+            if (p / '.git').exists():
+                return p
+        except OSError:
+            return None
+        if p == ROOT or ROOT not in p.parents:
+            return None
+        p = p.parent
+
+
+def _bufor_czasow(korzen: Path):
+    dane = getattr(KONF, 'katalog_danych', None)
+    if korzen is None or dane is None:
+        return None
+    plik = Path(dane) / 'czasy-git' / f'{korzen.name}.json'
+    try:
+        st = plik.stat()
+    except OSError:
+        return None
+    znacznik = (st.st_mtime_ns, st.st_size)
+    b = _BUFORY_GIT.get(str(plik))
+    if b is not None and b[0] == znacznik:
+        return b[1]
+    import json
+    try:
+        tresc = json.loads(plik.read_text(encoding='utf-8'))
+        if not isinstance(tresc.get('pliki'), dict):
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    _BUFORY_GIT[str(plik)] = (znacznik, tresc)
+    return tresc
+
+
+_STATX = []
+
+
+def _statx_btime(sciezka) -> 'float | None':
+    """Czas powstania z statx (Linux, glibc ≥ 2.28); None = system nie podaje."""
+    if sys.platform != 'linux':
+        return None
+    if not _STATX:
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            f = libc.statx
+            f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint,
+                          ctypes.c_void_p]
+            _STATX.append((ctypes, f))
+        except (OSError, AttributeError):
+            _STATX.append(None)
+    if _STATX[0] is None:
+        return None
+    ctypes, f = _STATX[0]
+    bufor = ctypes.create_string_buffer(256)
+    # AT_FDCWD=-100, AT_STATX_DONT_SYNC=0x4000, STATX_BTIME=0x800
+    if f(-100, os.fsencode(str(sciezka)), 0x4000, 0x800, bufor) != 0:
+        return None
+    maska = int.from_bytes(bufor.raw[0:4], 'little')
+    if not maska & 0x800:
+        return None
+    sek = int.from_bytes(bufor.raw[80:88], 'little', signed=True)
+    nsek = int.from_bytes(bufor.raw[88:92], 'little')
+    return sek + nsek / 1e9 if sek > 0 else None
+
+
+def _czasy_wpisu(item: Path, st, bufor, rel: str, katalog: bool):
+    """(zmiana, powstanie, powstanie_pewne): z bufora gita albo z systemu plików."""
+    if bufor is not None:
+        w = bufor.get('katalogi' if katalog else 'pliki', {}).get(rel)
+        if w:
+            return float(w[0]), float(w[1]), True
+    bt = getattr(st, 'st_birthtime', None) or _statx_btime(item)
+    if bt:
+        return st.st_mtime, bt, True
+    return st.st_mtime, st.st_mtime, False
+
+
+def _komorka_powstania(bt: float, pewne: bool) -> str:
+    if pewne:
+        return f'<td data-sort="{bt:.0f}">{_fmt_time(bt)}</td>'
+    return (f'<td data-sort="{bt:.0f}" title="System plików nie podaje daty powstania '
+            f'— pokazano czas modyfikacji">≈ {_fmt_time(bt)}</td>')
+
+
 def _fmt_time(ts):
     try:
         return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
@@ -2971,14 +3070,23 @@ async def serve(request):
             rows.append('<tr class="up"><td><a href="../" class="dir">📁 ..</a></td>'
                         '<td data-sort="-2">—</td><td data-sort="0"></td>'
                         '<td data-sort="0"></td></tr>')
+        korzen_git = _korzen_gita(target)
+        bufor_git = _bufor_czasow(korzen_git)
         for item in items:
             if item.name.endswith(('.meta.json', '.resume.json')) or item.name.startswith('.'):
                 continue
             try:
                 st = item.stat()
-                bt = getattr(st, 'st_birthtime', st.st_ctime)   # crtime jeśli dostępny, inaczej ctime
-                mt_s, bt_s = _fmt_time(st.st_mtime), _fmt_time(bt)
-                if _jest_katalogiem_bezpiecznie(item):
+                jest_kat = _jest_katalogiem_bezpiecznie(item)
+                if korzen_git is not None:
+                    buf, rel = bufor_git, item.relative_to(korzen_git).as_posix()
+                elif jest_kat and (item / '.git').exists():
+                    buf, rel = _bufor_czasow(item), ''          # sam klon (np. vault/)
+                else:
+                    buf, rel = None, ''
+                mt, bt, bt_pewne = _czasy_wpisu(item, st, buf, rel, jest_kat)
+                mt_s = _fmt_time(mt)
+                if jest_kat:
                     dq = quote(item.name)
                     rows.append(
                         f'<tr data-name="{_html.escape(item.name, quote=True)}">'
@@ -2990,8 +3098,8 @@ async def serve(request):
                         f'<a href="{dq}/?zip=1" class="dl" title="Pobierz folder jako .zip">🗜</a>'
                         f'<a href="{dq}/" class="dir">📁 {_esc(item.name)}/</a></td>'
                         f'<td data-sort="-1">—</td>'
-                        f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
-                        f'<td data-sort="{bt:.0f}">{bt_s}</td></tr>')
+                        f'<td data-sort="{mt:.0f}">{mt_s}</td>'
+                        + _komorka_powstania(bt, bt_pewne) + '</tr>')
                 else:
                     s = st.st_size
                     icon = ICONS.get(item.suffix.lower().lstrip('.'), '📄')
@@ -3024,8 +3132,8 @@ async def serve(request):
                         f'{lek}'
                         f'<a href="{href}">{icon} {_esc(item.name)}</a></td>'
                         f'<td data-sort="{s}">{_fmt_size(s)}</td>'
-                        f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
-                        f'<td data-sort="{bt:.0f}">{bt_s}</td></tr>')
+                        f'<td data-sort="{mt:.0f}">{mt_s}</td>'
+                        + _komorka_powstania(bt, bt_pewne) + '</tr>')
                 n += 1
             except Exception:
                 pass
@@ -3052,7 +3160,8 @@ async def serve(request):
                'urządzenia">⎋ wyloguj</a>' if KONF.logowanie == 'formularz' else '')
             + f'{_battery_html()}</p>',
             '<table><thead><tr>'
-            '<th>Nazwa</th><th>Rozmiar</th><th>Modyfikacja</th><th>Utworzono</th>'
+            '<th>Nazwa</th><th>Rozmiar</th><th title="Ostatnia zmiana treści">Modyfikacja</th>'
+            '<th title="Powstanie pliku: z historii git (klony) albo z systemu plików">Powstanie</th>'
             '</tr></thead><tbody>',
             *rows,
             '</tbody></table>',

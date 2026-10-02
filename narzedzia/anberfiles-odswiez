@@ -8,11 +8,14 @@
 # Po udanym pullu tools/czas_z_gita.py przywraca czasy modyfikacji plików z historii
 # (inaczej wszystkie mają datę pobrania). Błąd tego kroku to tylko ostrzeżenie.
 # ANBERFILES_PYTHON (domyślnie <baza>/venv/bin/python), ANBERFILES_KOD (domyślnie <baza>/kod).
+# Bufor dat dla listy katalogów (zmiana treści + powstanie): <dane>/czasy-git/<klon>.json,
+# ANBERFILES_DANE (domyślnie <baza>/dane); jednostka potrzebuje zapisu do <dane>/czasy-git.
 # Kod wyjścia: 0 = oba klony aktualne, 1 = choć jeden błąd (opis na stderr).
 set -u
 BAZA="${ANBERFILES_BAZA:-/srv/anberfiles}"
 PYTHON="${ANBERFILES_PYTHON:-$BAZA/venv/bin/python}"
 SKRYPT_CZASU="${ANBERFILES_KOD:-$BAZA/kod}/tools/czas_z_gita.py"
+BUFORY="${ANBERFILES_DANE:-$BAZA/dane}/czasy-git"
 KOD=0
 for r in vault wykonawca; do
     k="$BAZA/$r"
@@ -28,7 +31,7 @@ for r in vault wykonawca; do
     fi
     po="$(git -C "$k" rev-parse --short HEAD)"
     echo "$r: $przed -> $po"
-    if ! czas="$(timeout 120 "$PYTHON" "$SKRYPT_CZASU" "$k" 2>&1)"; then
+    if ! czas="$(timeout 120 "$PYTHON" "$SKRYPT_CZASU" "$k" --bufor "$BUFORY/$r.json" 2>&1)"; then
         echo "$r: OSTRZEŻENIE — czasy plików z historii NIE przywrócone: $czas" >&2
     else
         echo "$r: $czas"

@@ -87,3 +87,103 @@ def test_nie_klon_konczy_sie_bledem(tmp_path):
     wynik = _uruchom(tmp_path)
     assert wynik.returncode != 0
     assert wynik.stderr.strip()
+
+
+# ── zmiany nazwy i położenia (zgłoszenie Karola 02.10: „Wciąż wszędzie są te
+# same daty”) — 01.10 wieczorem cały vault przeniesiono `git mv`, a poprzednia
+# wersja brała czas ostatniego commita, czyli przeniesienia.
+
+D_DODANIE = "2024-01-01T12:00:00+0000"
+D_ZMIANA = "2024-01-03T12:00:00+0000"
+D_PRZENIESIENIE = "2024-01-05T12:00:00+0000"
+D_ZMIANA_NAZWY_Z_TRESCIA = "2024-01-07T12:00:00+0000"
+T_DODANIE = calendar.timegm((2024, 1, 1, 12, 0, 0))
+T_ZMIANA = calendar.timegm((2024, 1, 3, 12, 0, 0))
+T_ZMIANA_NAZWY_Z_TRESCIA = calendar.timegm((2024, 1, 7, 12, 0, 0))
+
+TRESC = "".join(f"wiersz {i} z dłuższą treścią notatki\n" for i in range(40))
+
+
+@pytest.fixture
+def repo_przeniesienia(tmp_path):
+    r = tmp_path / "vault"
+    r.mkdir()
+    _git(r, "init", "-q")
+    (r / "notatka.md").write_text(TRESC, encoding="utf-8")
+    (r / "nietknieta.md").write_text(TRESC + "inna\n", encoding="utf-8")
+    (r / "przemianowana.md").write_text(TRESC + "trzecia\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "dodanie", data=D_DODANIE)
+    (r / "notatka.md").write_text(TRESC + "dopisek\n", encoding="utf-8")
+    _git(r, "commit", "-q", "-am", "zmiana treści", data=D_ZMIANA)
+    (r / "Projekt" / "Zasoby").mkdir(parents=True)
+    _git(r, "mv", "notatka.md", "Projekt/Zasoby/notatka.md")
+    _git(r, "mv", "nietknieta.md", "Projekt/Zasoby/nietknieta.md")
+    _git(r, "commit", "-q", "-m", "Porządek vaulta: przeniesienie", data=D_PRZENIESIENIE)
+    _git(r, "mv", "przemianowana.md", "Projekt/nowa-nazwa.md")
+    (r / "Projekt" / "nowa-nazwa.md").write_text(TRESC + "trzecia\npoprawka\n", encoding="utf-8")
+    _git(r, "commit", "-q", "-am", "zmiana nazwy z poprawką", data=D_ZMIANA_NAZWY_Z_TRESCIA)
+    teraz = time.time()
+    for p in r.rglob("*"):
+        if ".git" not in p.parts:
+            os.utime(p, (teraz, teraz))
+    return r
+
+
+def test_przeniesienie_nie_jest_zmiana_tresci(repo_przeniesienia, tmp_path):
+    """Plik zmieniony 3.01, przeniesiony 5.01 → data 3.01, powstanie 1.01."""
+    r = repo_przeniesienia
+    bufor = tmp_path / "dane" / "czasy-git" / "vault.json"
+    wynik = subprocess.run([sys.executable, str(SKRYPT), str(r), "--bufor", str(bufor)],
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert wynik.returncode == 0, wynik.stderr
+    assert int(os.stat(r / "Projekt" / "Zasoby" / "notatka.md").st_mtime) == T_ZMIANA
+    # nigdy nie zmieniana treść → data dodania, mimo przeniesienia
+    assert int(os.stat(r / "Projekt" / "Zasoby" / "nietknieta.md").st_mtime) == T_DODANIE
+    # zmiana nazwy RAZEM ze zmianą treści → to jest zmiana treści
+    assert int(os.stat(r / "Projekt" / "nowa-nazwa.md").st_mtime) == T_ZMIANA_NAZWY_Z_TRESCIA
+    import json
+    b = json.loads(bufor.read_text(encoding="utf-8"))
+    assert b["pliki"]["Projekt/Zasoby/notatka.md"] == [T_ZMIANA, T_DODANIE]
+    assert b["pliki"]["Projekt/Zasoby/nietknieta.md"] == [T_DODANIE, T_DODANIE]
+    assert b["pliki"]["Projekt/nowa-nazwa.md"] == [T_ZMIANA_NAZWY_Z_TRESCIA, T_DODANIE]
+    assert b["katalogi"]["Projekt/Zasoby"] == [T_ZMIANA, T_DODANIE]
+    assert len(b["head"]) == 40
+
+
+def test_lista_katalogow_pokazuje_daty_z_bufora(repo_przeniesienia, tmp_path):
+    """Lista AnberFiles: Modyfikacja = zmiana treści, Powstanie = dodanie —
+    z bufora w katalogu danych, nie z czasu pobrania klonu."""
+    from datetime import datetime
+    from conftest import HASLO, uruchom, wczytaj, zbuduj_jarvis
+    import aiohttp
+    k = wczytaj(zbuduj_jarvis(tmp_path, logowanie='basic'))
+    vault = tmp_path / "srv" / "korzen" / "vault"
+    shutil.move(str(repo_przeniesienia), str(vault))
+    wynik = subprocess.run([sys.executable, str(SKRYPT), str(vault), "--bufor",
+                            str(k.katalog_danych / "czasy-git" / "vault.json")],
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert wynik.returncode == 0, wynik.stderr
+    teraz = time.time()
+    for p in vault.rglob("*"):                 # np. ponowne pobranie: mtime = teraz
+        if ".git" not in p.parts:
+            os.utime(p, (teraz, teraz))
+
+    async def sc(cl):
+        r = await cl.get("/vault/Projekt/Zasoby/", auth=aiohttp.BasicAuth("admin", HASLO))
+        return await r.text()
+    html = uruchom(k, sc)
+
+    def f(t):
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+    wiersz = html[html.index('data-name="notatka.md"'):]
+    wiersz = wiersz[:wiersz.index("</tr>")]
+    assert f'data-sort="{T_ZMIANA}">{f(T_ZMIANA)}</td>' in wiersz
+    assert f'data-sort="{T_DODANIE}">{f(T_DODANIE)}</td>' in wiersz
+    assert ">Powstanie</th>" in html
+
+
+def test_komorka_powstania_bez_daty_z_systemu_plikow_ma_adnotacje():
+    import server
+    assert "≈" in server._komorka_powstania(1.0e9, False)
+    assert "≈" not in server._komorka_powstania(1.0e9, True)
