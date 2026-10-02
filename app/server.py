@@ -20,6 +20,7 @@ from urllib.parse import quote
 import asyncio
 import hashlib
 import hmac
+import logging
 import shutil
 import sys
 from aiohttp import web
@@ -221,6 +222,73 @@ def _evlog(kind: str, msg: str, level: str = 'info'):
             EVENT_LOG.write_text(data[-_EVLOG_CAP // 2:], encoding='utf-8')
     except Exception:
         pass
+
+# ── Dziennik dostępu (D2) ───────────────────────────────────────────────────
+# Jedna linia na żądanie: czas \t adres \t metoda \t ścieżka?zapytanie \t kod
+# \t bajty treści \t czas obsługi. Bez nagłówków i ciasteczek; wartości
+# parametrów z sekretem (token=, haslo=) zastąpione ***. Plik
+# katalog_danych/access.log (klucz dziennik_dostepu), rotacja 5 × 5 MB.
+DOSTEP_MAX_B = 5 * 1024 * 1024
+DOSTEP_KOPIE = 5
+_PARAM_SEKRETNY = re.compile(r'(?i)(^|&)((?:token|haslo|password)=)[^&]*')
+_DZIENNIK_DOSTEPU = None
+
+
+def _maskuj_zapytanie(zapytanie: str) -> str:
+    return _PARAM_SEKRETNY.sub(r'\1\2***', zapytanie)
+
+
+class DziennikDostepu(web.AbstractAccessLogger):
+    """Rejestrator dostępu aiohttp (access_log_class) — format jak wyżej."""
+
+    def log(self, request, response, czas):
+        try:
+            zap = request.rel_url.raw_query_string
+            sciezka = request.rel_url.raw_path + ('?' + _maskuj_zapytanie(zap) if zap else '')
+            # bajty treści (Content-Length); strumień bez długości (ZIP) —
+            # bajty wysłane łącznie z nagłówkami
+            bajty = response.content_length
+            if bajty is None:
+                bajty = response.body_length
+            self.logger.info('%s\t%s\t%s\t%s\t%d\t%d\t%.0fms',
+                             datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                             request.remote or '-', request.method, sciezka,
+                             response.status, bajty, czas * 1000)
+        except Exception:
+            pass                             # dziennik nie może wywrócić odpowiedzi
+
+
+def zamknij_dziennik_dostepu(app=None):
+    """Zamyka plik dziennika dostępu (on_cleanup; kolejny start otwiera nowy)."""
+    lg = logging.getLogger('anberfiles.dostep')
+    for h in list(lg.handlers):
+        lg.removeHandler(h)
+        h.close()
+
+
+async def _dziennik_stop(app):
+    zamknij_dziennik_dostepu()
+
+
+def opcje_dziennika_dostepu() -> dict:
+    """Argumenty dla web.run_app / AppRunner: rejestrator i jego logger."""
+    import logging.handlers
+    zamknij_dziennik_dostepu()
+    lg = logging.getLogger('anberfiles.dostep')
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    try:
+        h = logging.handlers.RotatingFileHandler(
+            KONF.dziennik_dostepu, maxBytes=DOSTEP_MAX_B, backupCount=DOSTEP_KOPIE,
+            encoding='utf-8')
+    except OSError as e:
+        _evlog('start', f'dziennik dostępu {KONF.dziennik_dostepu} niedostępny: {e}',
+               level='warn')
+        return {'access_log': None}
+    h.setFormatter(logging.Formatter('%(message)s'))
+    lg.addHandler(h)
+    return {'access_log_class': DziennikDostepu, 'access_log': lg}
+
 
 ICONS = {'pdf': '📕', 'html': '🌐', 'md': '📝', 'jpg': '🖼', 'jpeg': '🖼',
          'png': '🖼', 'xlsx': '📊', 'xls': '📊', 'csv': '📊', 'txt': '📄',
@@ -4415,6 +4483,7 @@ def utworz_aplikacje(k):
     app.on_startup.append(_pamiec_start)
     app.on_startup.append(_soffice_start)          # piaskownica sieci soffice (C9)
     app.on_cleanup.append(_pamiec_stop)
+    app.on_cleanup.append(_dziennik_stop)
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)
     app.router.add_delete('/{path:.*}', delete_item)
@@ -4448,7 +4517,7 @@ def main():
         auth_info = f'user={USER}' if PASSW else 'OPEN (no auth)'
     print(f'AnberFiles [{k.nazwa_instancji}]: http://{HOST}:{PORT}/ — {auth_info}'
           f' — {_konf.opis(k)}', flush=True)
-    web.run_app(app, host=HOST, port=PORT, access_log=None)
+    web.run_app(app, host=HOST, port=PORT, **opcje_dziennika_dostepu())
 
 
 if __name__ == '__main__':

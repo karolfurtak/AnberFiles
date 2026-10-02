@@ -116,7 +116,11 @@ def uruchom(k, scenariusz, naglowek: bool = True):
     async def _run():
         app = server.utworz_aplikacje(k)
         app.middlewares.insert(0, podstaw_adres)
-        async with TestClient(TestServer(app),
+        # dziennik dostępu jak w main() (D2); stary kod bez funkcji → bez dziennika
+        opcje = getattr(server, 'opcje_dziennika_dostepu', dict)()
+        serwer = TestServer(app)
+        await serwer.start_server(**opcje)           # opcje AppRunner (jak run_app)
+        async with TestClient(serwer,
                               headers=NAGLOWEK_STRONY if naglowek else None) as cl:
             return await scenariusz(cl)
     return asyncio.run(_run())

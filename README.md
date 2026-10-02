@@ -151,6 +151,10 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   - formularze logowania i „Ustaw hasło" (zwykły formularz HTML, działa bez JS
     i z menedżerem haseł) zamiast nagłówka sprawdzają `Origin`: obecny musi wskazywać
     ten sam host:port co `Host`, inaczej 403.
+- Dziennik dostępu: `katalog_danych/access.log` (klucz `[katalogi] dziennik_dostepu`;
+  na konsoli `/mnt/data/access.log`) — linia na żądanie: czas, adres, metoda, ścieżka
+  z zapytaniem, kod, bajty treści, czas obsługi; rotacja 5 × 5 MB (`access.log.1`…`.5`).
+  Bez nagłówków i ciasteczek; wartości `token=`, `haslo=`, `password=` jako `***`.
 - `soffice_bez_sieci` (`[serwer]`, `auto`/`tak`/`nie`, domyślnie `auto`) — LibreOffice
   (podgląd DOCX, druk) uruchamiany w piaskownicy bez sieci (`bwrap --unshare-net`, a gdy
   go brak — `unshare -n`), żeby pole `INCLUDEPICTURE http://…` w dokumencie nie kazało

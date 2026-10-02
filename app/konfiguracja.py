@@ -44,7 +44,7 @@ KLUCZE = {
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
-                 'katalog_eksportu', 'favikona', 'kosz'),
+                 'katalog_eksportu', 'favikona', 'kosz', 'dziennik_dostepu'),
     'moduly': MODULY,
 }
 
@@ -78,6 +78,7 @@ class Konfiguracja:
     favikona: Path
     kosz: Path
     moduly: dict = field(default_factory=dict)
+    dziennik_dostepu: 'Path | None' = None   # None = katalog_danych/access.log
     zrodlo: str = 'domyślne (Anbernic)'
     logowanie: str = 'basic'
     limit_wgrywania_mb: int = 512        # łączny rozmiar jednego wgrywania (413 ponad)
@@ -266,6 +267,7 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         katalog_eksportu=sciezka_k('katalog_eksportu', glowny / 'EXPORT'),
         favikona=sciezka_k('favikona', dane / 'dev-skills' / 'favicons' / 'favicon.ico'),
         kosz=sciezka_k('kosz', glowny / '.kosz'),
+        dziennik_dostepu=sciezka_k('dziennik_dostepu', dane / 'access.log'),
         moduly={n: _bool('moduly', n, m.get(n, 'tak')) for n in MODULY},
         zrodlo=zrodlo,
         logowanie=logowanie,
@@ -317,7 +319,8 @@ def sprawdz_przy_starcie(k: Konfiguracja) -> list:
             proba.unlink()
         except OSError:
             pass
-    for nazwa in ('rejestr_zdarzen', 'kolejka_lektora', 'bledy_lektora', 'bledy_druku'):
+    for nazwa in ('rejestr_zdarzen', 'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
+                  'dziennik_dostepu'):
         rodzic = getattr(k, nazwa).parent
         if not rodzic.is_dir():
             bledy.append(f'{nazwa}: katalog {rodzic} nie istnieje.')

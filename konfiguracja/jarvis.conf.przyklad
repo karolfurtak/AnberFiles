@@ -48,6 +48,7 @@ rejestr_zdarzen  = /srv/anberfiles/dane/anberfiles-events.log
 kolejka_lektora  = /srv/anberfiles/dane/lektor_queue.json
 bledy_lektora    = /srv/anberfiles/dane/lektor_errors.log
 bledy_druku      = /srv/anberfiles/dane/print_errors.log
+dziennik_dostepu = /srv/anberfiles/dane/access.log   ; adres, metoda, ścieżka (token=*** ), kod, bajty, czas; rotacja 5 × 5 MB
 katalog_lektora  = /srv/anberfiles/korzen/lektor   ; musi leżeć w katalog_glowny
 pamiec_podr_docx = /srv/anberfiles/dane/cache/docx-preview
 katalog_zip_tmp  = /srv/anberfiles/dane/zip_tmp
