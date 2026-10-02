@@ -51,15 +51,32 @@ ZRODLA_UWAGI = ('tekst',)         # później: 'glos'
 LIMIT_UWAGI = 4000                # znaków
 LIMIT_NAGLOWKA_B = 8192           # tyle bajtów początku pliku czyta skan
 LIMIT_NOTATKI_B = 2 * 1024 * 1024  # większych plików skan nie bierze
-# zakładki listy: nazwa → statusy
+# zakładki listy: nazwa → statusy (kolejność = kolejność przycisków).
+# „wdrozenia” i „informacyjne” zbiera stan wdrożenia z pliku klasyfikacji
+# (decyzja Karola 02.10) — tylko dla pozycji jeszcze nierozstrzygniętych.
 ZAKLADKI = {
     'decyzja': ('do-akceptacji',),
+    'wdrozenia': (),
+    'informacyjne': (),
     'zaakceptowane': ('zaakceptowane-niewdrozone',),
     'rozstrzygniete': ('do-poprawy', 'odrzucone', 'wdrozone'),
 }
 NAZWY_ZAKLADEK = {'decyzja': 'Do decyzji',
+                  'wdrozenia': 'Zlecone i wdrożone',
+                  'informacyjne': 'Informacyjne',
                   'zaakceptowane': 'Zaakceptowane, niewdrożone',
                   'rozstrzygniete': 'Rozstrzygnięte'}
+# stan wdrożenia z kolumny „Stan wdrożenia” pliku klasyfikacji (wielkie litery,
+# porównanie po początku; NIEZLECONE przed ZLECONE)
+STANY_WDROZENIA = (('NIE DOTYCZY', 'nie-dotyczy'), ('NIEZLECONE', 'niezlecone'),
+                   ('CZĘŚCIOWO', 'czesciowo'), ('ZLECONE', 'zlecone'),
+                   ('WDROŻONE', 'wdrozone'))
+NAZWY_STANOW = {'niezlecone': 'niezlecone', 'czesciowo': 'częściowo',
+                'zlecone': 'zlecone', 'wdrozone': 'wdrożone',
+                'nie-dotyczy': 'nie dotyczy', 'nieznany': 'stan nieznany'}
+ZAKLADKA_STANU = {'niezlecone': 'decyzja', 'czesciowo': 'decyzja', 'nieznany': 'decyzja',
+                  'zlecone': 'wdrozenia', 'wdrozone': 'wdrozenia',
+                  'nie-dotyczy': 'informacyjne'}
 
 
 class BladStanu(Exception):
@@ -113,27 +130,81 @@ def tytul(tekst: str, nazwa: str) -> str:
 _WIERSZ_KANDYDATA = re.compile(r'^\|\s*`([^`]+?\.md)`\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|')
 
 
+class Kandydaci(dict):
+    """{ścieżka: wpis}; ma_stan = któraś tabela pliku ma kolumnę „Stan wdrożenia”."""
+    ma_stan = False
+
+
+def _komorki(linia: str) -> list:
+    """Komórki wiersza tabeli Markdown (bez skrajnych „|”; „\\|” nie dzieli)."""
+    czesci = re.split(r'(?<!\\)\|', linia.strip())
+    return [c.strip() for c in czesci[1:-1]]
+
+
+def stan_wdrozenia(komorka: str) -> str:
+    s = komorka.replace('*', '').replace('`', '').strip().upper()
+    for wzor, stan in STANY_WDROZENIA:
+        if s.startswith(wzor):
+            return stan
+    return 'nieznany'
+
+
+def _tekst_komorki(k: str, limit: int = 300) -> str:
+    k = k.replace('\\|', '|').replace('`', '').replace('**', '').strip()
+    if k in ('—', '-', '–'):
+        return ''
+    return k if len(k) <= limit else k[:limit - 1].rstrip() + '…'
+
+
 def wczytaj_kandydatow(plik) -> dict:
-    """Tabela Markdown z wierszami | `ścieżka względna` | rodzaj | status | …
-    → {ścieżka: {'rodzaj', 'status'}}. Status spoza STATUSY → „do-akceptacji”
-    (propozycja domyślna). Brak pliku → {}."""
+    """Tabele Markdown z wierszami | `ścieżka względna` | rodzaj | status | …
+    → {ścieżka: {'rodzaj', 'status', 'stan', 'do_wdrozenia', 'dowod', 'kolejnosc'}}.
+    Status spoza STATUSY → „do-akceptacji” (propozycja domyślna). Kolumny od
+    czwartej czytane PO NAZWIE nagłówka tabeli: „Stan wdrożenia”, „Do wdrożenia”,
+    „… dowód” (wersja 2 pliku, 02.10); tabela bez nich → stan None, kolejność
+    None (zachowanie jak w wersji 1). Brak pliku → {}."""
+    wynik = Kandydaci()
     if not plik:
-        return {}
+        return wynik
     try:
         tekst = Path(plik).read_text(encoding='utf-8', errors='replace')
     except OSError:
-        return {}
-    wynik = {}
+        return wynik
+    kolumny = {}
     for linia in tekst.splitlines():
-        m = _WIERSZ_KANDYDATA.match(linia.strip())
+        lin = linia.strip()
+        m = _WIERSZ_KANDYDATA.match(lin)
         if not m:
+            if lin.startswith('|') and 'ścieżka' in lin.lower():
+                naz = [k.lower() for k in _komorki(lin)]
+                kolumny = {}
+                for i, k in enumerate(naz):
+                    if k.startswith('stan'):
+                        kolumny.setdefault('stan', i)
+                    elif k.startswith('do wdrożenia'):
+                        kolumny.setdefault('do_wdrozenia', i)
+                    elif 'dowód' in k or 'pilność' in k:
+                        kolumny.setdefault('dowod', i)
+                if 'stan' in kolumny:
+                    wynik.ma_stan = True
             continue
         sciezka = m.group(1).replace('\\', '/').strip('/')
         if '..' in Path(sciezka).parts:
             continue
         status = m.group(3).strip().lower().replace(' ', '-')
-        wynik[sciezka] = {'rodzaj': m.group(2).strip(),
-                          'status': status if status in STATUSY else 'do-akceptacji'}
+        wpis = {'rodzaj': m.group(2).strip(),
+                'status': status if status in STATUSY else 'do-akceptacji',
+                'stan': None, 'do_wdrozenia': '', 'dowod': '', 'kolejnosc': None}
+        if 'stan' in kolumny:
+            k = _komorki(lin)
+            def kom(n):
+                i = kolumny.get(n)
+                return k[i] if i is not None and i < len(k) else ''
+            wpis.update(stan=stan_wdrozenia(kom('stan')),
+                        do_wdrozenia=_tekst_komorki(kom('do_wdrozenia')),
+                        dowod=_tekst_komorki(kom('dowod')),
+                        kolejnosc=len(wynik))
+        wynik[sciezka] = wpis
     return wynik
 
 
@@ -189,6 +260,13 @@ def skanuj(zakres: Path, kandydaci: dict) -> list:
                 'zrodlo_statusu': zrodlo,
                 'odcisk': odcisk(tekst),
                 'mtime': st.st_mtime,
+                # stan wdrożenia (wersja 2 pliku klasyfikacji); notatka spoza
+                # pliku, gdy plik ma stany → „stan nieznany”
+                'stan': ((kand or {}).get('stan')
+                         or ('nieznany' if getattr(kandydaci, 'ma_stan', False) else None)),
+                'do_wdrozenia': (kand or {}).get('do_wdrozenia', ''),
+                'dowod': (kand or {}).get('dowod', ''),
+                'kolejnosc': (kand or {}).get('kolejnosc'),
             })
     return wynik
 
@@ -215,6 +293,14 @@ def zakladka_statusu(status: str) -> str:
         if status in statusy:
             return z
     return ''
+
+
+def zakladka_pozycji(status: str, stan) -> str:
+    """Pozycja nierozstrzygnięta (do-akceptacji) ze stanem wdrożenia → zakładka
+    wg stanu; decyzje Karola i statusy z nagłówka → zakładka wg statusu."""
+    if status == 'do-akceptacji' and stan in ZAKLADKA_STANU:
+        return ZAKLADKA_STANU[stan]
+    return zakladka_statusu(status)
 
 
 # ── Stan: decyzje, odsłuch, ustawienia widoku ───────────────────────────────

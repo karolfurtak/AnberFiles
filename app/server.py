@@ -4633,7 +4633,8 @@ def _prz_wiersze(notatki: list) -> list:
         ost = ostatnie.get(n['sciezka'])
         status, zrodlo = _prz.status_efektywny(n, ost)
         w = dict(n)
-        w.update(status=status, zrodlo=zrodlo, zakladka=_prz.zakladka_statusu(status),
+        w.update(status=status, zrodlo=zrodlo,
+                 zakladka=_prz.zakladka_pozycji(status, n.get('stan')),
                  ostatnia=ost, odsluch=_PRZ_MAGAZYN.odsluch(n['sciezka']),
                  nieprzeniesiona=bool(zrodlo == 'decyzja' and ost['id'] > granica),
                  url='/' + quote(_rel_root(n['plik'])),
@@ -4836,6 +4837,12 @@ PRZ_STYLE = (
     '.lek button.gen{font:inherit;color:#7ab7ff;background:#232731;border:1px solid #343a45;'
     'border-radius:6px;padding:.3em .8em;min-height:36px;cursor:pointer}'
     '#tnagr.on{background:#1a5fb4;color:#fff;border-color:#1a5fb4}'
+    '.sw{border-radius:5px;padding:0 .4em;font-weight:600}'
+    '.sw.niezlecone{background:#5a1f1f;color:#ffb4ab}.sw.czesciowo{background:#5a4510;color:#f0d68a}'
+    '.sw.zlecone,.sw.wdrozone{background:#1d4a2e;color:#9fe0b0}'
+    '.sw.nie-dotyczy{background:#2b3240;color:#9aa0ab}.sw.nieznany{background:#3a2f4a;color:#d7c4ff}'
+    '.dw{color:#b8bec8;font-size:.82em;margin-top:.35em;line-height:1.4}'
+    '.dw.dd{color:#8a93a0;font-size:.76em}'
     '.tt{font-size:1.02em;line-height:1.35}'
     '.mt{color:#9aa0ab;font-size:.8em;margin-top:.3em;display:flex;gap:.6em;flex-wrap:wrap}'
     '.st{border-radius:5px;padding:0 .4em;background:#2b3240;color:#cfe3ff}'
@@ -4885,9 +4892,12 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
     tabs = ''.join(
         f'<button data-z="{z}" class="{"on" if z == zakladka else ""}">'
         f'{_esc(_prz.NAZWY_ZAKLADEK[z])} ({lic[z]})</button>' for z in _prz.ZAKLADKI)
+    # kolejność: jak wiersze pliku klasyfikacji (v2 — według pilności), potem
+    # pozycje spoza pliku po staremu: projekt alfabetycznie, od najnowszej
     pokaz = sorted((w for w in wiersze if w['zakladka'] == zakladka
                     and (not tylko_nagrane or w['nagranie'])),
-                   key=lambda w: (w['projekt'].lower(), -w['mtime']))
+                   key=lambda w: (w.get('kolejnosc') is None, w.get('kolejnosc') or 0,
+                                  w['projekt'].lower(), -w['mtime']))
     czesci, projekt = [], None
     for w in pokaz:
         if w['projekt'] != projekt:
@@ -4896,6 +4906,9 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
         znaczniki = [f'<span class="st{" p" if w["zrodlo"] == "propozycja" else ""}">'
                      f'{_esc(_prz.NAZWY_STATUSOW.get(w["status"], w["status"]))}'
                      + (' · propozycja' if w['zrodlo'] == 'propozycja' else '') + '</span>']
+        if w.get('stan'):
+            znaczniki.append(f'<b class="sw {w["stan"]}">'
+                             f'{_esc(_prz.NAZWY_STANOW.get(w["stan"], w["stan"]))}</b>')
         if w['rodzaj']:
             znaczniki.append(_esc(w['rodzaj']))
         znaczniki.append(datetime.fromtimestamp(w['mtime']).strftime('%d.%m.%Y'))
@@ -4917,11 +4930,16 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
                       f'data-n="{_esc(Path(w["plik"]).name)}">🔊 generuj</button>'
                       if sn['rodzaj'] in ('brak', 'blad') else '')
                    + '</div>')
+        opis = ''
+        if w.get('do_wdrozenia'):
+            opis += f'<div class="dw">{_esc(w["do_wdrozenia"])}</div>'
+        if w.get('dowod'):
+            opis += f'<div class="dw dd">{_esc(w["dowod"])}</div>'
         czesci.append(
             f'<div class="row"><a class="lnk" href="{w["url"]}?sluchaj=1">'
             f'<div class="tt">{_esc(w["tytul"])}'
             f'</div><div class="mt">{"".join(f"<span>{z}</span>" for z in znaczniki)}'
-            f'</div></a>{lek}</div>')
+            f'</div>{opis}</a>{lek}</div>')
     tresc = ''.join(czesci) or (
         f'<div class="pusto">Brak notatek w zakładce „{_esc(_prz.NAZWY_ZAKLADEK[zakladka])}”.'
         '</div>')

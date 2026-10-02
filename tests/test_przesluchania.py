@@ -508,3 +508,61 @@ def test_czas_trwania_nagran_z_naglowka(tmp_path):
     (tmp_path / 'c.mp3').write_bytes(b'ID3' + bytes(64))       # bez ramek
     assert nagrania.czas_trwania_s(tmp_path / 'c.mp3') is None
     assert nagrania.opis_czasu(754) == '12 min 34 s' and nagrania.opis_czasu(None) == ''
+
+
+# ── plik klasyfikacji v2: stan wdrożenia → trzy zakładki (decyzja Karola 02.10) ──
+
+KLASYFIKACJA_V2 = (
+    '# Klasyfikacja v2\n\n## 1. Do wdrożenia\n\n'
+    '| Ścieżka | Rodzaj | Status | Stan wdrożenia | Do wdrożenia | Pilność i dowód |\n'
+    '|---|---|---|---|---|---|\n'
+    '| `Zasoby/Rhino/koncepcja.md` | koncepcja | do-akceptacji | CZĘŚCIOWO | Etap 2: siatka '
+    '\| powierzchnia | pilne — zwrot 08.10 |\n'
+    '| `Zasoby/MoCap/plan-kamer.md` | plan | do-akceptacji | NIEZLECONE | Kalibracja K0–K4 | — |\n'
+    '\n## 2. Wdrożone lub informacyjne\n\n'
+    '| Ścieżka | Rodzaj | Status | Stan wdrożenia | Do wdrożenia | Pilność i dowód |\n'
+    '|---|---|---|---|---|---|\n'
+    '| `Zasoby/MoCap/notatka-bez-statusu.md` | analiza | do-akceptacji | **WDROŻONE** | Moduł X '
+    '| `abc1234`, zlecenie 82 |\n'
+    '| `Zasoby/prompty/prompt.md` | prompt | do-akceptacji | NIE DOTYCZY | — | — |\n')
+
+
+def test_klasyfikacja_v2_trzy_zakladki_stan_i_kolejnosc_z_pliku(tmp_path, auth):
+    k, v = _konf(tmp_path)
+    (v / 'Zasoby' / 'klasyfikacja.md').write_text(KLASYFIKACJA_V2, encoding='utf-8')
+
+    async def sc(cl):
+        dec = await _lista(cl, auth, 'decyzja')
+        wdr = await _lista(cl, auth, 'wdrozenia')
+        inf = await _lista(cl, auth, 'informacyjne')
+        r = await _decyzja(cl, auth, 'Rhino/koncepcja.md', 'akceptuje')
+        dec2 = await _lista(cl, auth, 'decyzja')
+        zaak = await _lista(cl, auth, 'zaakceptowane')
+        return dec, wdr, inf, r.status, dec2, zaak
+    dec, wdr, inf, st, dec2, zaak = uruchom(k, sc)
+    for nazwa in ('Do decyzji (3)', 'Zlecone i wdrożone (1)', 'Informacyjne (1)'):
+        assert nazwa in dec, nazwa
+    # kolejność = kolejność wierszy pliku (Rhino przed MoCap), pozycja spoza pliku na końcu
+    i_konc, i_plan = dec.index('Rhino/koncepcja.md'), dec.index('MoCap/plan-kamer.md')
+    i_zl = dec.index('MoCap/zlosliwa.md')
+    assert i_konc < i_plan < i_zl
+    assert '<b class="sw czesciowo">częściowo</b>' in dec
+    assert '<b class="sw niezlecone">niezlecone</b>' in dec
+    assert 'Etap 2: siatka | powierzchnia' in dec and 'pilne — zwrot 08.10' in dec
+    assert '<b class="sw nieznany">stan nieznany</b>' in dec[i_zl - 600:]
+    assert 'notatka-bez-statusu.md' in wdr and 'abc1234, zlecenie 82' in wdr
+    assert '<b class="sw wdrozone">wdrożone</b>' in wdr and 'koncepcja.md' not in wdr
+    assert 'prompty/prompt.md' in inf and 'plan-kamer.md' not in inf
+    # decyzja Karola nadal przenosi pozycję do zakładek decyzji
+    assert st == 200 and 'Rhino/koncepcja.md' not in dec2 and 'Rhino/koncepcja.md' in zaak
+
+
+def test_klasyfikacja_v1_bez_kolumny_stanu_dziala_jak_dotad(tmp_path, auth):
+    """Plik bez nowych kolumn: brak oznaczeń stanu, kolejność projektami."""
+    k, v = _konf(tmp_path)
+
+    async def sc(cl):
+        return await _lista(cl, auth, 'decyzja')
+    dec = uruchom(k, sc)
+    assert 'class="sw' not in dec and 'stan nieznany' not in dec
+    assert dec.index('MoCap/plan-kamer.md') < dec.index('Rhino/koncepcja.md')
