@@ -1,0 +1,38 @@
+# Ustawienia instancji AnberFiles — przykład dla Jarvisa (Raspberry Pi 5).
+# Kopia robocza leży POZA repozytorium (np. /etc/anberfiles/jarvis.conf),
+# a usługa wskazuje ją zmienną ANBERFILES_CONF.
+# Hasło NIE w tym pliku: zmienna SERVER_PASS (np. EnvironmentFile=/etc/anberfiles/haslo.env).
+# Priorytet: zmienna środowiska (SERVER_HOST, SERVER_PORT, SERVER_USER) > ten plik > domyślne.
+# Komentarz w linii: po średniku lub krzyżyku.
+
+[serwer]
+nazwa_instancji = Jarvis
+host            = 0.0.0.0        ; dostęp z sieci lokalnej odcina zapora systemu
+port            = 8790
+uzytkownik_www  = karol
+haslo_wymagane  = tak            ; pusty SERVER_PASS = serwer nie startuje
+tylko_odczyt    = tak            ; wgrywanie, usuwanie, zmiana nazwy, nowy katalog → 403
+
+[katalogi]
+katalog_glowny   = /srv/anberfiles/korzen
+katalog_danych   = /srv/anberfiles/dane     ; jedyne miejsce zapisu (oprócz katalogu lektora)
+rejestr_zdarzen  = /srv/anberfiles/dane/anberfiles-events.log
+kolejka_lektora  = /srv/anberfiles/dane/lektor_queue.json
+bledy_lektora    = /srv/anberfiles/dane/lektor_errors.log
+bledy_druku      = /srv/anberfiles/dane/print_errors.log
+katalog_lektora  = /srv/anberfiles/korzen/lektor   ; musi leżeć w katalog_glowny
+pamiec_podr_docx = /srv/anberfiles/dane/cache/docx-preview
+katalog_zip_tmp  = /srv/anberfiles/dane/zip_tmp
+katalog_eksportu = /srv/anberfiles/eksport          ; czytaj_tts.py + lektor-ustawienia.conf
+favikona         = /srv/anberfiles/dane/favicon.ico
+kosz             = /srv/anberfiles/dane/kosz
+
+[moduly]
+podglad_docx    = tak
+eksport_docx    = nie
+lektor          = tak
+lektor_opisy_ai = nie
+wylaczanie      = nie
+druk            = tak
+bateria         = nie
+kadrowanie      = nie

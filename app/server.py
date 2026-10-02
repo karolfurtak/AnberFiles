@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""File server dla /mnt/data/sprawozdania/ — port 8765, HTTP basic auth.
+"""AnberFiles — serwer plików HTTP (aiohttp), HTTP Basic Auth.
 
-Konfiguracja przez env (systemd EnvironmentFile=/etc/sprawozdania-server.env):
-    SERVER_PORT (default 8765)
-    SERVER_USER (default anbernic)
-    SERVER_PASS — WYMAGANE
-    SERVER_HOST (default 0.0.0.0 = LAN, można 127.0.0.1 = tylko SSH tunnel)
+Ścieżki, port i przełączniki modułów: app/konfiguracja.py (plik ustawień
+instancji wskazany zmienną ANBERFILES_CONF; brak zmiennej = ustawienia konsoli
+Anbernic). Zmienne środowiska nadal działają i wygrywają z plikiem:
+    SERVER_PORT, SERVER_USER, SERVER_HOST; hasło wyłącznie SERVER_PASS.
 
 Listing katalogu = sortowalna tabela (Nazwa, Rozmiar, Modyfikacja, Utworzono).
 Kliknięcie nagłówka kolumny sortuje (rozmiar i daty sortowane numerycznie).
@@ -19,7 +18,12 @@ from pathlib import Path
 from urllib.parse import quote
 import asyncio
 import hashlib
+import hmac
+import shutil
+import sys
 from aiohttp import web
+
+import konfiguracja as _konf
 
 try:
     import markdown as _markdown      # renderowany podgląd .md (opcjonalny)
@@ -30,8 +34,10 @@ except Exception:
 def _battery_html() -> str:
     """Poziom baterii konsoli (PMIC axp2202) do linii informacyjnej —
     aktualizuje się razem z auto-odświeżaniem listingu."""
+    if not KONF.modul('bateria'):
+        return ''
     try:
-        base = Path('/sys/class/power_supply/axp2202-battery')
+        base = _konf.SCIEZKA_BATERII
         cap = int((base / 'capacity').read_text().strip())
         st = (base / 'status').read_text().strip()
     except Exception:
@@ -46,14 +52,52 @@ def _natkey(s: str):
     """Klucz sortowania naturalnego: 'plik_10' PO 'plik_9' (liczby jako liczby)."""
     return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
 
-ROOT  = Path('/mnt/data/sprawozdania')
-PORT  = int(os.environ.get('SERVER_PORT', '8765'))
-HOST  = os.environ.get('SERVER_HOST', '0.0.0.0')
-USER  = os.environ.get('SERVER_USER', 'anbernic')
-PASSW = os.environ.get('SERVER_PASS', '')
+# Ustawienia instancji — wartości przypisuje zastosuj_konfiguracje() (przy
+# imporcie: domyślne Anbernica; main() i testy podają właściwe).
+KONF = None
+ROOT = PORT = HOST = USER = PASSW = None
+EVENT_LOG = DOCX_CACHE = EXPORT_DIR = FAVICON_ICO_PATH = None
+CZYTAJ_TTS = LEKTOR_CONF = LEKTOR_QFILE = None
+
+
+def zastosuj_konfiguracje(k):
+    """Przypisuje stałe modułu z ustawień instancji (jedno źródło prawdy)."""
+    global KONF, ROOT, PORT, HOST, USER, PASSW, EVENT_LOG, DOCX_CACHE
+    global EXPORT_DIR, FAVICON_ICO_PATH, CZYTAJ_TTS, LEKTOR_CONF, LEKTOR_QFILE
+    KONF = k
+    ROOT = Path(k.katalog_glowny).resolve()
+    PORT, HOST, USER, PASSW = k.port, k.host, k.uzytkownik_www, k.haslo
+    EVENT_LOG = k.rejestr_zdarzen
+    DOCX_CACHE = k.pamiec_podr_docx
+    EXPORT_DIR = k.katalog_eksportu
+    FAVICON_ICO_PATH = k.favikona
+    CZYTAJ_TTS = str(k.czytaj_tts)
+    LEKTOR_CONF = str(k.lektor_conf)
+    LEKTOR_QFILE = k.kolejka_lektora
+
+
+zastosuj_konfiguracje(_konf.domyslna())
+
+
+def _odmowa_zapisu():
+    """403 dla operacji zapisu w trybie tylko do odczytu (None = wolno)."""
+    if KONF.tylko_odczyt:
+        return web.Response(
+            status=403, text=f'Instancja {KONF.nazwa_instancji} działa w trybie '
+                             'tylko do odczytu — zapis wyłączony w ustawieniach.')
+    return None
+
+
+def _modul_wylaczony(nazwa: str):
+    """403 dla funkcji wyłączonej przełącznikiem [moduly] (None = włączona)."""
+    if not KONF.modul(nazwa):
+        return web.Response(
+            status=403, text=f'Moduł „{nazwa}" jest wyłączony w ustawieniach '
+                             f'instancji {KONF.nazwa_instancji}.')
+    return None
+
 
 # ── Rejestr zdarzeń i błędów (podgląd: /?events=1) ───────────────────────────
-EVENT_LOG = Path('/mnt/data/anberfiles-events.log')
 _EVLOG_CAP = 2 * 1024 * 1024          # 2 MB — przytnij gdy urośnie
 
 
@@ -88,34 +132,56 @@ XLSX_EXT = {'.xlsx', '.xlsm'}                    # podgląd przez openpyxl (.xls
 AUDIO_MIME = {'.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.wav': 'audio/wav',
               '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.opus': 'audio/opus'}
 
-# Lektor zapisuje <stem>_lektor.<ext> obok dokumentu. Preferuj FLAC > MP3 > ...
+# Lektor zapisuje <stem>_lektor.<ext>: obok dokumentu (Anbernic) albo w
+# katalog_lektora/<ścieżka względna katalogu źródła>/ (gdy ustawiony).
+# Preferuj FLAC > MP3 > ...
 LEKTOR_AUDIO_EXT = ('.flac', '.mp3', '.wav', '.ogg', '.m4a', '.opus')
 
 
-def _lektor_audio_for(target: Path):
-    """Ścieżka pliku lektora dla podglądanego dokumentu, jeśli istnieje."""
+def _lektor_dir_for(target: Path):
+    """Katalog wyników lektora dla dokumentu w katalogu lektora instancji
+    (None = katalog lektora nie ustawiony albo dokument poza katalogiem głównym)."""
+    if KONF.katalog_lektora is None:
+        return None
+    try:
+        rel = target.parent.resolve().relative_to(ROOT)
+    except ValueError:
+        return None
+    return Path(KONF.katalog_lektora).resolve() / rel
+
+
+def _lektor_dirs(target: Path, exports: bool):
+    """Katalogi, w których może leżeć audio lektora dla dokumentu — w kolejności."""
+    dirs = [target.parent]
+    if exports:
+        dirs.append(target.parent.parent / 'exports')
+    kl = _lektor_dir_for(target)
+    if kl is not None:
+        dirs.append(kl)
+    return dirs
+
+
+def _lektor_audio_for(target: Path, exports: bool = False):
+    """Ścieżka pliku lektora dla podglądanego dokumentu, jeśli istnieje
+    (obok dokumentu, opcjonalnie w ../exports/, w katalogu lektora)."""
     base = target.stem + '_lektor'
-    for ext in LEKTOR_AUDIO_EXT:
-        p = target.with_name(base + ext)
-        if p.exists():
-            return p
+    for d in _lektor_dirs(target, exports):
+        for ext in LEKTOR_AUDIO_EXT:
+            p = d / (base + ext)
+            if p.exists():
+                return p
     return None
 
 
 def _lektor_audio_for_doc(target: Path):
-    """Jak wyżej, ale dla DOKUMENTU ŹRÓDŁOWEGO: sprawdza folder pliku ORAZ
-    siostrzany ../exports/ (układ projektu: processed/<X>.md → exports/<X>_lektor.*)."""
-    p = _lektor_audio_for(target)
-    if p is not None:
-        return p
-    exp = target.parent.parent / 'exports'
-    if exp.is_dir():
-        base = target.stem + '_lektor'
-        for ext in LEKTOR_AUDIO_EXT:
-            cand = exp / (base + ext)
-            if cand.exists():
-                return cand
-    return None
+    """Jak wyżej, ale dla DOKUMENTU ŹRÓDŁOWEGO: także siostrzany ../exports/
+    (układ projektu: processed/<X>.md → exports/<X>_lektor.*)."""
+    return _lektor_audio_for(target, exports=True)
+
+
+def _url_abs(p: Path) -> str:
+    """Bezwzględny adres URL pliku w katalogu głównym (audio z innego katalogu)."""
+    return '/' + quote(p.resolve().relative_to(ROOT).as_posix())
 
 
 def _audio_chapters(aud, md_text: str = ''):
@@ -151,10 +217,16 @@ def _audio_chapters(aud, md_text: str = ''):
     return []
 
 
-def _lektor_cues_for(target: Path):
-    """Sidecar timingów zdaniowych (<stem>_lektor.cues.json), jeśli istnieje."""
-    p = target.with_name(target.stem + '_lektor.cues.json')
-    return p if p.exists() else None
+def _lektor_cues_for(target: Path, aud: Path = None):
+    """Sidecar timingów zdaniowych (<stem>_lektor.cues.json), jeśli istnieje —
+    najpierw obok znalezionego audio, potem w katalogach lektora dokumentu."""
+    name = target.stem + '_lektor.cues.json'
+    dirs = ([aud.parent] if aud is not None else []) + _lektor_dirs(target, True)
+    for d in dirs:
+        p = d / name
+        if p.exists():
+            return p
+    return None
 
 
 def render_read_page(target: Path, audio: Path, cues_path: Path) -> str:
@@ -172,7 +244,7 @@ def render_read_page(target: Path, audio: Path, cues_path: Path) -> str:
     for i, c in enumerate(cues):
         txt = _html.escape(c.get('text', ''))
         spans.append(f'<span class=s data-i="{i}" onclick="seek({i})">{txt}</span>')
-    aq = quote(audio.name)
+    aq = _url_abs(audio)
     dq = quote(target.name)
     body = ' '.join(spans) or '<em>brak zdań w sidecarze</em>'
     times_js = '[' + ','.join(f'{t:.2f}' for t in times) + ']'
@@ -198,7 +270,7 @@ def render_read_page(target: Path, audio: Path, cues_path: Path) -> str:
         '</style>'
         '<div class="hd"><div class="bar">'
         '<a href="./">📁 folder</a>'
-        f'<a href="{dq}?view=1">📘 PDF</a>'
+        f'<a href="{dq}?view=1">📘 podgląd</a>'
         f'<span style="word-break:break-all">{_html.escape(target.name)}</span>'
         f'<span style="color:#6fce8f;margin-left:auto">📖 {len(cues)} zdań</span>'
         '</div>'
@@ -722,7 +794,6 @@ def render_xlsx_page(target: Path) -> str:
         + f'<script>{XLSX_TABLE_JS}</script>')
 
 
-DOCX_CACHE = Path('/mnt/data/.cache/docx-preview')
 _LO_LOCK = asyncio.Lock()   # jedna konwersja naraz (A53)
 
 
@@ -760,7 +831,6 @@ async def docx_to_pdf(target: Path) -> Path | None:
     return None
 
 
-EXPORT_DIR = Path('/mnt/data/sprawozdania/EXPORT')
 _DOCX_EXPORT_LOCK = asyncio.Lock()   # python-docx + obrazy — jeden eksport naraz (A53)
 
 
@@ -827,7 +897,7 @@ async def _export_md_docx(target: Path):
     out_docx = out_dir / (target.stem + '.docx')
     async with _DOCX_EXPORT_LOCK:
         proc = await asyncio.create_subprocess_exec(
-            'python3', str(script), str(target), '-o', str(out_docx),
+            sys.executable, str(script), str(target), '-o', str(out_docx),
             '--base-dir', str(base_dir),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd))
@@ -1041,7 +1111,7 @@ def render_md_page(target: Path) -> str:
     aud = _lektor_audio_for_doc(target)
     audio_html = ''
     if aud is not None:
-        aurl = '/' + quote(str(aud.relative_to(ROOT)))
+        aurl = _url_abs(aud)
         chaps = _audio_chapters(aud, src)
         chaps_js = __import__('json').dumps(chaps, ensure_ascii=False)
         chrows = ''
@@ -1063,7 +1133,10 @@ def render_md_page(target: Path) -> str:
             '<div class="lekwrap"><div class="lekplay">'
             '<span class="lk">🔊 lektor</span>'
             f'<audio id="lek" controls preload="metadata" src="{aurl}"></audio>'
-            f'<a href="{aurl}?view=1" title="Pełny odtwarzacz (tempo)">⛶</a></div>'
+            f'<a href="{aurl}?view=1" title="Pełny odtwarzacz (tempo)">⛶</a>'
+            + (f'<a href="{q}?read=1" title="Czytanie z podświetlaniem zdań">📖</a>'
+               if _lektor_cues_for(target, aud) else '')
+            + '</div>'
             + chaps_panel +
             '<script>(function(){'
             f'const CH={chaps_js};const au=document.getElementById("lek");'
@@ -1109,9 +1182,12 @@ def render_md_page(target: Path) -> str:
         f'<span class="name">{target.name}</span>'
         f'<span style="color:#888">{idx + 1} / {len(sibs)}</span>'
         f'<a href="{q}?dl=1">⬇ pobierz</a>'
-        f'<a href="{q}?docx=1" id="docxbtn" title="Eksport do Word (.docx) — '
-        'obrazy + równania">⬇ DOCX</a>'
-        f'<a href="#" id="prn" data-n="{q}">🖨 drukuj</a></div>'
+        + (f'<a href="{q}?docx=1" id="docxbtn" title="Eksport do Word (.docx) — '
+           'obrazy + równania">⬇ DOCX</a>'
+           if KONF.modul('eksport_docx') and not KONF.tylko_odczyt else '')
+        + (f'<a href="#" id="prn" data-n="{q}">🖨 drukuj</a>'
+           if KONF.modul('druk') else '')
+        + '</div>'
         '<div id="docxprog" class="docxprog"><span class="dpt"></span>'
         '<div class="dptrack"><div class="dpbar"></div></div></div>'
         + audio_html +
@@ -1155,7 +1231,8 @@ def render_md_page(target: Path) -> str:
         'const im=e.target.closest&&e.target.closest("img");'
         'if(im&&r.contains(im))location.href=im.src.split("?")[0]+"?view=1";});'
         # druk na Canon G3070 (md→DOCX→PDF→lp na konsoli, ~1-2 min)
-        'document.getElementById("prn").onclick=async e=>{'
+        'const _prn=document.getElementById("prn");'
+        'if(_prn)_prn.onclick=async e=>{'
         'e.preventDefault();const a=e.target;'
         'if(!confirm("Wydrukować na Canon G3070?\\n'
         '(md→DOCX→PDF jak przy sprawozdaniach; ok. 1–2 min; '
@@ -1341,10 +1418,10 @@ DEL_JS = (
     '🔊 Lektor: \'+name+\'</div>'
     '<div style="color:#556;font-size:.9em;margin-bottom:.7em">'
     'Format nagrania (generacja dłuższych dokumentów może potrwać '
-    'kilkanaście minut):</div>\'+radios+'
+    'kilkanaście minut):</div>\'+radios+(window._LEK_OPISY===false?"":'
     '\'<div style="color:#556;font-size:.9em;margin:.8em 0 .3em;'
     'border-top:1px solid #e4e8ee;padding-top:.7em">'
-    '🖼 Opisy ilustracji (model wizyjny):</div>\'+dradios+'
+    '🖼 Opisy ilustracji (model wizyjny):</div>\'+dradios)+'
     '\'<div style="display:flex;gap:.6em;margin-top:1em;'
     'justify-content:flex-end">'
     '<button data-a="x">Anuluj</button>'
@@ -1386,7 +1463,7 @@ DEL_JS = (
     'a.title=(j.status==="queued"?"W kolejce (poz. "+j.position+"): "'
     ':"Generuję: ")+(j.out||"");'
     'setTimeout(()=>a.textContent="🔊",2500);}'
-    'else{alert("Lektor: "+(j.status||r.status));a.textContent="🔊";}'
+    'else{alert("Lektor: "+(j.blad||j.status||r.status));a.textContent="🔊";}'
     '}catch(err){alert("Błąd lektora");a.textContent="🔊";}return;}'
     'if(a.classList.contains("cpy")){'
     'let ok=false;'
@@ -1756,7 +1833,8 @@ async def auth(request, handler):
         u, p = base64.b64decode(h[6:]).decode().split(':', 1)
     except Exception:
         return web.Response(status=401, headers={'WWW-Authenticate': 'Basic realm="Anbernic"'})
-    if u != USER or p != PASSW:
+    if not (hmac.compare_digest(u.encode(), USER.encode())
+            and hmac.compare_digest(p.encode(), PASSW.encode())):
         return web.Response(status=401, text='Niepoprawne dane',
                             headers={'WWW-Authenticate': 'Basic realm="Anbernic"'})
     return await handler(request)
@@ -1995,7 +2073,6 @@ FAVICON_SVG = (
     '<path d="M13 6h6v7h7v6h-7v7h-6v-7H6v-6h7z" fill="#9d6bff"/>'
     '<circle cx="16" cy="16" r="2.1" fill="#1b0f33"/>'
     '</svg>')
-FAVICON_ICO_PATH = Path('/mnt/data/dev-skills/favicons/favicon.ico')
 FAVICON_LINK = ('<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
                 '<link rel="alternate icon" href="/favicon.ico">')
 
@@ -2026,13 +2103,13 @@ def _build_zip(target: Path, out_path: str):
 
 async def _zip_dir(request, target: Path):
     """GET <katalog>?zip=1 → spakowanie folderu do .zip i strumieniowe pobranie.
-    Zip budowany do pliku tymczasowego na /mnt/data (NIE /tmp = tmpfs/RAM), usuwany
+    Zip budowany do pliku tymczasowego w katalog_zip_tmp (NIE /tmp = tmpfs/RAM), usuwany
     po wysłaniu. Budowa w executorze + lock (jeden naraz)."""
     import os
     import tempfile
     import time
-    tmpdir = ROOT / '.zip_tmp'
-    tmpdir.mkdir(exist_ok=True)
+    tmpdir = KONF.katalog_zip_tmp
+    tmpdir.mkdir(parents=True, exist_ok=True)
     _now = time.time()                       # sprzątnij osierocone zipy (>1 h, np. po restarcie)
     for _old in tmpdir.glob('*.zip'):
         try:
@@ -2072,11 +2149,18 @@ async def _zip_dir(request, target: Path):
 
 async def serve(request):
     # widok/stan kolejki lektora (dostępny z dowolnej ścieżki)
+    if 'lektorq' in request.query or 'lektorqj' in request.query:
+        odm = _modul_wylaczony('lektor')
+        if odm is not None:
+            return odm
     if 'lektorq' in request.query:
         return web.Response(text=LEKTORQ_PAGE, content_type='text/html')
     if 'lektorqj' in request.query:
         return web.json_response(_lektor_queue_json())
     if 'docxprog' in request.query:
+        odm = _modul_wylaczony('eksport_docx')
+        if odm is not None:
+            return odm
         try:
             import json as _j
             return web.json_response(
@@ -2156,6 +2240,9 @@ async def serve(request):
 
         rows = []
         n = 0
+        zapis = not KONF.tylko_odczyt            # 🗑 ✎ 📁+ i upuszczanie plików
+        lektor_on = KONF.modul('lektor')
+        docx_view = KONF.modul('podglad_docx')
         if target != ROOT:
             rows.append('<tr class="up"><td><a href="../" class="dir">📁 ..</a></td>'
                         '<td data-sort="-2">—</td><td data-sort="0"></td>'
@@ -2171,9 +2258,11 @@ async def serve(request):
                     dq = quote(item.name)
                     rows.append(
                         f'<tr data-name="{_html.escape(item.name, quote=True)}">'
-                        f'<td><a href="#" class="dl del" data-n="{dq}" title="Usuń (do .kosz; tylko pusty katalog)">🗑</a>'
-                        f'<a href="#" class="dl ren" data-n="{dq}" title="Zmień nazwę">✎</a>'
-                        f'<a href="#" class="dl cpy" data-n="{dq}" title="Kopiuj nazwę">⧉</a>'
+                        '<td>'
+                        + (f'<a href="#" class="dl del" data-n="{dq}" title="Usuń (do .kosz; tylko pusty katalog)">🗑</a>'
+                           f'<a href="#" class="dl ren" data-n="{dq}" title="Zmień nazwę">✎</a>'
+                           if zapis else '')
+                        + f'<a href="#" class="dl cpy" data-n="{dq}" title="Kopiuj nazwę">⧉</a>'
                         f'<a href="{dq}/?zip=1" class="dl" title="Pobierz folder jako .zip">🗜</a>'
                         f'<a href="{item.name}/" class="dir">📁 {item.name}/</a></td>'
                         f'<td data-sort="-1">—</td>'
@@ -2189,17 +2278,25 @@ async def serve(request):
                             if (ext in IMG_EXT or ext in AUDIO_EXT
                                 or ext in VIDEO_EXT or ext in MODEL_EXT
                                 or ext in CSV_EXT or ext in XLSX_EXT
-                                or ext in ('.md', '.docx', '.doc'))
+                                or ext == '.md'
+                                or (ext in ('.docx', '.doc') and docx_view))
                             else q)
                     lek = ('<a href="#" class="dl lek" data-n="' + q
                            + '" title="Lektor → audio">🔊</a>'
-                           if ext in ('.md', '.docx', '.txt') else '')
+                           if lektor_on and ext in ('.md', '.docx', '.txt') else '')
+                    # audio lektora w osobnym katalogu — skrót przy dokumencie
+                    if ext in ('.md', '.docx', '.txt') and KONF.katalog_lektora:
+                        _aud = _lektor_audio_for(item, exports=True)
+                        if _aud is not None and _aud.parent != item.parent:
+                            lek += (f'<a href="{_url_abs(_aud)}?view=1" class="dl" '
+                                    f'title="Odtwórz nagranie lektora">🎧</a>')
                     rows.append(
                         f'<tr data-name="{_html.escape(item.name, quote=True)}">'
                         f'<td><a href="{q}?dl=1" class="dl" title="Pobierz">⬇</a>'
-                        f'<a href="#" class="dl del" data-n="{q}" title="Usuń (do .kosz)">🗑</a>'
-                        f'<a href="#" class="dl ren" data-n="{q}" title="Zmień nazwę">✎</a>'
-                        f'<a href="#" class="dl cpy" data-n="{q}" title="Kopiuj nazwę">⧉</a>'
+                        + (f'<a href="#" class="dl del" data-n="{q}" title="Usuń (do .kosz)">🗑</a>'
+                           f'<a href="#" class="dl ren" data-n="{q}" title="Zmień nazwę">✎</a>'
+                           if zapis else '')
+                        + f'<a href="#" class="dl cpy" data-n="{q}" title="Kopiuj nazwę">⧉</a>'
                         f'{lek}'
                         f'<a href="{href}">{icon} {item.name}</a></td>'
                         f'<td data-sort="{s}">{_fmt_size(s)}</td>'
@@ -2217,9 +2314,13 @@ async def serve(request):
             f'<style>{STYLE}</style>',
             f'<h2>{breadcrumb}</h2>',
             f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
-            f'⟳ auto-odświeżanie · <a href="/?lektorq=1">🔊 kolejka lektora</a>'
-            f' · <a href="?explorer=1">🌳 drzewo</a>'
-            f' · <a href="#" id="mkd">📁+ nowy folder</a>'
+            f'⟳ auto-odświeżanie'
+            + (' · <a href="/?lektorq=1">🔊 kolejka lektora</a>' if lektor_on else '')
+            + ' · <a href="?explorer=1">🌳 drzewo</a>'
+            + (' · <a href="#" id="mkd">📁+ nowy folder</a>' if zapis else '')
+            + (f' · <span class="muted">🔒 tylko odczyt ({_html.escape(KONF.nazwa_instancji)})</span>'
+               if not zapis else '')
+            +
             f' · <a href="?zip=1" title="Pobierz CAŁY ten folder jako .zip">🗜 ZIP folderu</a>'
             f' · <a href="#" id="cpcol" title="Skopiuj nazwy wszystkich plików (po jednej w wierszu)">⧉ kopiuj nazwy plików</a>'
             f'{_battery_html()}</p>',
@@ -2229,10 +2330,11 @@ async def serve(request):
             *rows,
             '</tbody></table>',
             SORT_JS,
-            DROP_JS,
+            DROP_JS if zapis else '',
+            '' if KONF.modul('lektor_opisy_ai') else '<script>window._LEK_OPISY=false;</script>',
             DEL_JS,
-            LEKTOR_BAR_JS,
-            MKDIR_JS,
+            LEKTOR_BAR_JS if lektor_on else '',
+            MKDIR_JS if zapis else '',
             COPYCOL_JS,
         ]
         return web.Response(text='\n'.join(html), content_type='text/html')
@@ -2242,8 +2344,11 @@ async def serve(request):
 
 
 async def delete_item(request):
-    """DELETE na pliku = przeniesienie do ROOT/.kosz/ (nic nie znika trwale).
-    Katalogi: tylko puste (rmdir). .kosz ukryty w listingu (dotfile)."""
+    """DELETE na pliku = przeniesienie do kosza (klucz kosz; domyślnie ROOT/.kosz/,
+    nic nie znika trwale). Katalogi: tylko puste (rmdir). .kosz ukryty w listingu."""
+    odm = _odmowa_zapisu()
+    if odm is not None:
+        return odm
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -2258,24 +2363,23 @@ async def delete_item(request):
             return web.Response(status=400, text='Katalog niepusty')
         target.rmdir()
         return web.json_response({'deleted': raw})
-    trash = ROOT / '.kosz'
-    trash.mkdir(exist_ok=True)
+    trash = KONF.kosz
+    trash.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     dest = trash / f'{ts}_{target.name}'
-    target.rename(dest)
+    shutil.move(str(target), str(dest))
     return web.json_response({'deleted': raw, 'kosz': dest.name})
 
 
-CZYTAJ_TTS = '/mnt/data/sprawozdania/EXPORT/czytaj_tts.py'
-LEKTOR_CONF = '/mnt/data/sprawozdania/EXPORT/lektor-ustawienia.conf'
 _LEKTOR_LOCK = None        # asyncio.Lock tworzony leniwie (jeden lektor naraz)
 _LEKTOR_SEQ = 0
 _LEKTOR_QUEUE: list = []   # rejestr zadań: id/out/src/fmt/state/cancelled/proc
 _LEKTOR_PAUSED = False     # pauza całej kolejki (⏸ w widoku kolejki)
 _LEKTOR_SHUTDOWN = False   # „wyłącz konsolę po ukończeniu kolejki" (⏻)
+_LEKTOR_BLEDY: list = []   # ostatnie nieudane zadania (widok kolejki) — nigdy cisza
+_LEKTOR_BLEDY_MAX = 20
 
 
-LEKTOR_QFILE = Path('/mnt/data/lektor_queue.json')
 
 
 def _lektor_save_queue():
@@ -2304,8 +2408,10 @@ async def _lektor_restore(app):
     except Exception:
         return
     _LEKTOR_PAUSED = bool(data.get('paused'))
-    _LEKTOR_SHUTDOWN = bool(data.get('shutdown'))
-    asyncio.ensure_future(_lektor_shutdown_watch())
+    # flaga ⏻ z pliku kolejki działa tylko tam, gdzie moduł wyłączania włączony
+    _LEKTOR_SHUTDOWN = bool(data.get('shutdown')) and KONF.modul('wylaczanie')
+    if KONF.modul('wylaczanie'):
+        asyncio.ensure_future(_lektor_shutdown_watch())
     prog = _lektor_progress()
     busy_stem = Path(prog['out']).stem if prog else None
     for it in data.get('jobs', []):
@@ -2335,6 +2441,48 @@ def _lektor_new_job(src, out, fmt, opisy='') -> dict:
     return job
 
 
+def _lektor_blad(job: dict, powod: str):
+    """Nieudane zadanie lektora: stan failed, wpis w bledy_lektora, w rejestrze
+    zdarzeń i na liście błędów widoku kolejki. Nigdy nie rzuca."""
+    import time as _t
+    job['state'] = 'failed'
+    job['blad'] = powod
+    _LEKTOR_BLEDY.append({'id': job['id'], 'out': Path(job['out']).name,
+                          'src': _lektor_src_rel(job['src']), 'state': 'failed',
+                          'blad': powod, 'czas': _t.strftime('%Y-%m-%d %H:%M:%S')})
+    del _LEKTOR_BLEDY[:-_LEKTOR_BLEDY_MAX]
+    try:
+        with open(KONF.bledy_lektora, 'ab') as f:
+            f.write(f'\n=== {Path(job["out"]).name} === BŁĄD: {powod}\n'.encode())
+    except OSError:
+        pass
+    _evlog('lektor', f'{Path(job["out"]).name}: {powod}', level='error')
+
+
+def _lektor_sprawdz_zapis(out: Path):
+    """Czy katalog wyniku przyjmie plik: utworzenie katalogu + plik próbny.
+    Zwraca opis błędu albo None."""
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        proba = out.parent / f'.{out.name}.proba'
+        proba.write_bytes(b'')
+        proba.unlink()
+    except OSError as e:
+        return f'katalog wyniku {out.parent} nie przyjmuje zapisu: {e}'
+    return None
+
+
+def _lektor_ogon_logu(n: int = 300) -> str:
+    """Ostatnie znaki logu błędów lektora (powód padu do widoku kolejki)."""
+    try:
+        with open(KONF.bledy_lektora, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - n))
+            return f.read().decode('utf-8', 'replace').strip().splitlines()[-1]
+    except (OSError, IndexError):
+        return ''
+
+
 async def _lektor_run(job: dict):
     out = Path(job['out'])
     shutdown = False
@@ -2350,11 +2498,15 @@ async def _lektor_run(job: dict):
             job['state'] = 'running'
             import time as _t
             job['started'] = _t.time()
+            blad = _lektor_sprawdz_zapis(out)
+            if blad:
+                _lektor_blad(job, blad)
+                return
             # stderr do logu — bez tego pad lektora był niemy (incydent:
             # zadanie znikało z kolejki bez śladu i bez pliku)
-            errlog = open('/mnt/data/lektor_errors.log', 'ab')
+            errlog = open(KONF.bledy_lektora, 'ab')
             errlog.write(f'\n=== {Path(job["out"]).name} ===\n'.encode())
-            cmd = ['python3', CZYTAJ_TTS, job['src'], '-o', job['out'],
+            cmd = [sys.executable, CZYTAJ_TTS, job['src'], '-o', job['out'],
                    '--format', job['fmt']]
             if job.get('opisy') in ('tak', 'nie'):
                 cmd += ['--opisy', job['opisy']]
@@ -2366,7 +2518,8 @@ async def _lektor_run(job: dict):
             await proc.wait()
             errlog.close()
             if proc.returncode not in (0, None) and not job['cancelled']:
-                job['state'] = 'failed'
+                _lektor_blad(job, f'czytaj_tts.py zakończył się kodem '
+                                  f'{proc.returncode}: {_lektor_ogon_logu()}')
             if job['cancelled']:
                 # przerwane — sprzątnij TYLKO pliki powstałe w trakcie
                 # TEGO zadania (mtime > start)
@@ -2396,8 +2549,11 @@ def _ext_lektor_pids() -> set:
     """PID-y czytaj_tts.py uruchomione POZA serwerem (agent z Discorda,
     CLI) — pgrep minus nasze własne dzieci z kolejki."""
     import subprocess
-    r = subprocess.run(['pgrep', '-f', 'czytaj_tts.py'],
-                       capture_output=True, text=True)
+    try:
+        r = subprocess.run(['pgrep', '-f', 'czytaj_tts.py'],
+                           capture_output=True, text=True)
+    except OSError:                      # brak pgrep (np. Windows) = brak obcych
+        return set()
     pids = {int(x) for x in r.stdout.split()} if r.returncode == 0 else set()
     # tylko realne interpretery Pythona — pgrep -f łapie też powłoki/wrappery,
     # których CMDLINE zawiera nazwę skryptu (np. sesję ssh agenta!)
@@ -2454,15 +2610,21 @@ def _lektor_progress():
         return None
 
 
+def _lektor_src_rel(src) -> str:
+    try:
+        return Path(src).resolve().relative_to(ROOT).as_posix()
+    except (ValueError, OSError):
+        return Path(src).name
+
+
 def _lektor_queue_json() -> dict:
     prog = _lektor_progress()
     jobs = []
     for j in _LEKTOR_QUEUE:
-        if j['cancelled']:
+        if j['cancelled'] or j['state'] == 'failed':
             continue
         e = {'id': j['id'], 'out': Path(j['out']).name,
-             'src': str(Path(j['src']).relative_to(ROOT))
-             if str(j['src']).startswith(str(ROOT)) else Path(j['src']).name,
+             'src': _lektor_src_rel(j['src']),
              'fmt': j['fmt'], 'state': j['state']}
         if j['state'] == 'running' and prog:
             e['pct'] = prog.get('pct', 0)
@@ -2470,7 +2632,9 @@ def _lektor_queue_json() -> dict:
         jobs.append(e)
     ext = _ext_lektor_running()
     out = {'jobs': jobs, 'external': ext, 'paused': _LEKTOR_PAUSED,
-           'shutdown': _LEKTOR_SHUTDOWN, 'bat': _battery_html()}
+           'shutdown': _LEKTOR_SHUTDOWN, 'bat': _battery_html(),
+           'wylaczanie': KONF.modul('wylaczanie'),
+           'bledy': list(_LEKTOR_BLEDY)}
     if ext and prog and not any(j['state'] == 'running' for j in jobs):
         out['ext_pct'] = prog.get('pct', 0)
         out['ext_chunk'] = f"{prog.get('chunk', 0)}/{prog.get('chunks', 0)}"
@@ -2525,6 +2689,8 @@ LEKTORQ_PAGE = (
     '<table><thead><tr><th>#</th><th>plik wynikowy</th><th>źródło</th>'
     '<th>format</th><th>stan</th><th></th></tr></thead>'
     '<tbody id="tb"></tbody></table>'
+    '<div id="ebw" style="display:none"><h2 style="color:#c00">✖ Nieudane zadania '
+    'lektora</h2><table><tbody id="eb"></tbody></table></div>'
     '<script>'
     'async function load(){'
     'try{const j=await(await fetch("/?lektorqj=1",{cache:"no-store"})).json();'
@@ -2560,6 +2726,12 @@ LEKTORQ_PAGE = (
     'document.getElementById("st").innerHTML='
     '"odświeżono "+new Date().toLocaleTimeString()+(j.bat||"");'
     'const sh=document.getElementById("shd");'
+    'sh.style.display=(j.wylaczanie===false)?"none":"";'
+    'const eb=document.getElementById("eb");let eh="";'
+    'for(const b of (j.bledy||[]).slice().reverse()){'
+    'eh+="<tr><td>✖</td><td>"+b.out+"</td><td style=\'color:#888\'>"+b.src'
+    '+"</td><td colspan=3 style=\'color:#c00\'>"+b.czas+" — "+b.blad+"</td></tr>";}'
+    'eb.innerHTML=eh;document.getElementById("ebw").style.display=eh?"":"none";'
     'sh.dataset.on=j.shutdown?"1":"0";'
     'sh.innerHTML=j.shutdown'
     '?"⏻ wyłącz konsolę po ukończeniu: <b style=\'color:#1d7a36\'>WŁĄCZONE</b>"'
@@ -2652,7 +2824,7 @@ def _docx_to_txt(p: Path) -> Path:
 async def print_item(request):
     """POST ?print=1 na .md/.docx/.pdf — druk na Canon G3070 (CUPS).
     .md → export_to_docx → soffice→PDF (paginacja jak w Wordzie) → lp.
-    Async; błędy → /mnt/data/print_errors.log."""
+    Async; błędy → plik bledy_druku z ustawień instancji."""
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -2666,7 +2838,7 @@ async def print_item(request):
 
     async def _run():
         import time as _t
-        log = open('/mnt/data/print_errors.log', 'ab')
+        log = open(KONF.bledy_druku, 'ab')
         log.write(f'\n=== {_t.strftime("%F %T")} {target.name} ===\n'.encode())
 
         async def sh(*cmd):
@@ -2679,8 +2851,7 @@ async def print_item(request):
             pdf = target
             if ext == '.md':
                 tmp_docx = Path('/tmp') / (target.stem + '_print.docx')
-                if await sh('python3',
-                            '/mnt/data/sprawozdania/EXPORT/export_to_docx.py',
+                if await sh(sys.executable, str(KONF.skrypt_eksportu_docx),
                             str(target), '-o', str(tmp_docx)):
                     return
                 pdf = Path('/tmp') / (tmp_docx.stem + '.pdf')
@@ -2706,8 +2877,13 @@ async def print_item(request):
 
 async def lektor_item(request):
     """POST ?lektor=1 na .md/.docx/.txt — generacja audio w TLE
-    (czytaj_tts.py). Wynik: <nazwa>_lektor.<fmt> obok pliku (fmt z conf);
-    auto-odświeżanie listingu pokaże go po zakończeniu."""
+    (czytaj_tts.py). Wynik: <nazwa>_lektor.<fmt> obok pliku (fmt z conf) albo
+    w katalog_lektora/<ścieżka względna katalogu źródła>/, gdy ustawiony;
+    auto-odświeżanie listingu pokaże go po zakończeniu. Dozwolone także
+    w trybie tylko do odczytu (zapis wyłącznie do katalogu lektora)."""
+    odm = _modul_wylaczony('lektor')
+    if odm is not None:
+        return odm
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -2737,14 +2913,28 @@ async def lektor_item(request):
     fmt = request.query.get('fmt', '').lower() or _lektor_fmt()
     if fmt not in ('mp3', 'wav', 'flac'):
         fmt = 'mp3'
+    # katalog lektora instancji (np. Jarvis: źródła tylko do odczytu) albo
     # konwencja sprawozdań: źródło w processed/ → audio do exports/ obok
     # (ta sama lokalizacja co lektor agenta z Discorda); inaczej obok pliku
-    out_dir = target.parent
-    if out_dir.name == 'processed' and (out_dir.parent / 'exports').is_dir():
-        out_dir = out_dir.parent / 'exports'
+    out_dir = _lektor_dir_for(target)
+    if out_dir is None:
+        if KONF.tylko_odczyt:
+            return web.Response(status=403, text='Tryb tylko do odczytu, a katalog '
+                                'lektora nie jest ustawiony — nie ma gdzie zapisać nagrania.')
+        out_dir = target.parent
+        if out_dir.name == 'processed' and (out_dir.parent / 'exports').is_dir():
+            out_dir = out_dir.parent / 'exports'
     out = out_dir / f'{target.stem}_lektor.{fmt}'
     if any(j['out'] == str(out) and not j['cancelled'] for j in _LEKTOR_QUEUE):
         return web.json_response({'status': 'duplikat', 'out': out.name})
+    blad = _lektor_sprawdz_zapis(out)
+    if blad:
+        global _LEKTOR_SEQ
+        _LEKTOR_SEQ += 1
+        job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt}
+        _lektor_blad(job, blad)
+        return web.json_response({'status': 'failed', 'out': out.name, 'blad': blad},
+                                 status=500)
 
     # lektor zajęty (przeglądarka ALBO agent z Discorda) → bez flagi queue
     # zwracamy 'busy'; UI pyta usera o dopisanie do kolejki
@@ -2756,6 +2946,8 @@ async def lektor_item(request):
     opisy = request.query.get('opisy', '')
     if opisy not in ('tak', 'nie'):
         opisy = ''
+    if not KONF.modul('lektor_opisy_ai'):
+        opisy = 'nie'                     # model wizyjny wyłączony w ustawieniach
     _lektor_new_job(src, out, fmt, opisy)
     return web.json_response(
         {'status': 'queued' if queued else 'start',
@@ -2765,6 +2957,9 @@ async def lektor_item(request):
 async def mkdir_item(request):
     """POST ?mkdir=<nazwa> na KATALOGU = utworzenie podkatalogu (bez nadpisywania).
     Nazwa sanityzowana przez .name (odcina ścieżki/.. ); 409 gdy już istnieje."""
+    odm = _odmowa_zapisu()
+    if odm is not None:
+        return odm
     raw = request.match_info.get('path', '').strip('/')
     try:
         parent = (ROOT / raw).resolve()
@@ -2791,6 +2986,9 @@ async def mkdir_item(request):
 async def rename_item(request):
     """POST ?rename=<nowa-nazwa> na pliku/katalogu = zmiana nazwy (ten sam
     katalog, bez nadpisywania — 409 gdy cel istnieje)."""
+    odm = _odmowa_zapisu()
+    if odm is not None:
+        return odm
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -2945,6 +3143,9 @@ def _lektor_maybe_shutdown():
     """Kolejka pusta + nic nie generuje + flaga ⏻ → shutdown za 1 min
     (okno na anulowanie togglem); flaga konsumowana."""
     global _LEKTOR_SHUTDOWN
+    if not KONF.modul('wylaczanie'):
+        _LEKTOR_SHUTDOWN = False          # urządzenie, którego nie wolno wyłączać
+        return
     if not _LEKTOR_SHUTDOWN:
         return
     if _LEKTOR_QUEUE or _ext_lektor_running():
@@ -2971,6 +3172,11 @@ async def crop_item(request):
     mode='copy' → nowy plik <stem>_crop<ext>; mode='overwrite' → nadpisuje
     oryginał (backup do .kosz). Współrzędne w pikselach NATURALNYCH obrazu
     (orientacja EXIF uwzględniona — jak widzi go przeglądarka)."""
+    odm = _odmowa_zapisu()
+    if odm is None:
+        odm = _modul_wylaczony('kadrowanie')
+    if odm is not None:
+        return odm
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -3037,11 +3243,18 @@ async def crop_item(request):
 
 async def upload(request):
     if 'print' in request.query:
-        return await print_item(request)
+        odm = _modul_wylaczony('druk')
+        return odm if odm is not None else await print_item(request)
     if 'crop' in request.query:
         return await crop_item(request)
+    if any(k in request.query for k in ('lektorqshutdown', 'lektorqpause',
+                                        'lektorqresume', 'lektorqdel')):
+        odm = _modul_wylaczony('lektor')
+        if odm is not None:
+            return odm
     if 'lektorqshutdown' in request.query:
-        return await lektor_shutdown_toggle(request)
+        odm = _modul_wylaczony('wylaczanie')
+        return odm if odm is not None else await lektor_shutdown_toggle(request)
     if 'lektorqpause' in request.query:
         return await lektor_pause(request)
     if 'lektorqresume' in request.query:
@@ -3054,8 +3267,11 @@ async def upload(request):
         return await mkdir_item(request)
     if 'lektor' in request.query:
         return await lektor_item(request)
-    """POST multipart na katalog = wgranie plików (drag&drop z przeglądarki).
-    Duplikaty nazw dostają sufiks z timestampem (jak w bocie) — nic nie nadpisujemy."""
+    # POST multipart na katalog = wgranie plików (drag&drop z przeglądarki).
+    # Duplikaty nazw dostają sufiks z timestampem (jak w bocie) — nic nie nadpisujemy.
+    odm = _odmowa_zapisu()
+    if odm is not None:
+        return odm
     raw = request.match_info.get('path', '').strip('/')
     try:
         target = (ROOT / raw).resolve()
@@ -3160,6 +3376,11 @@ async def _serve_file(request, target):
         return web.FileResponse(target, headers={
             'Content-Type': AUDIO_MIME[target.suffix.lower()]})
 
+    if target.suffix.lower() in ('.docx', '.doc') and (
+            'pdf' in request.query or 'view' in request.query):
+        odm = _modul_wylaczony('podglad_docx')
+        if odm is not None:
+            return odm
     # surowy PDF z konwersji (źródło dla <embed> w stronie podglądu)
     if 'pdf' in request.query and target.suffix.lower() in ('.docx', '.doc'):
         pdf = await docx_to_pdf(target)
@@ -3171,8 +3392,8 @@ async def _serve_file(request, target):
             'Cache-Control': 'no-cache'})
 
     if 'read' in request.query:
-        aud = _lektor_audio_for(target)
-        cue = _lektor_cues_for(target)
+        aud = _lektor_audio_for(target, exports=True)
+        cue = _lektor_cues_for(target, aud)
         if aud is not None and cue is not None:
             return web.Response(text=render_read_page(target, aud, cue),
                                 content_type='text/html')
@@ -3186,10 +3407,10 @@ async def _serve_file(request, target):
         q = quote(target.name)
         mt = target.stat().st_mtime
         # odtwarzacz lektora, jeśli istnieje <stem>_lektor.flac/mp3/... obok
-        aud = _lektor_audio_for(target)
-        cue = _lektor_cues_for(target)
+        aud = _lektor_audio_for(target, exports=True)
+        cue = _lektor_cues_for(target, aud)
         if aud is not None:
-            aq = quote(aud.name)
+            aq = _url_abs(aud)
             audio_html = (
                 '<audio id="lek" controls preload="metadata" '
                 f'src="{aq}" title="{aud.name}"></audio>')
@@ -3251,6 +3472,11 @@ async def _serve_file(request, target):
         return web.json_response({'mt': target.stat().st_mtime})
 
     if 'docx' in request.query and target.suffix.lower() == '.md':
+        odm = _odmowa_zapisu()
+        if odm is None:
+            odm = _modul_wylaczony('eksport_docx')
+        if odm is not None:
+            return odm
         return await _export_md_docx(target)
 
     if 'view' in request.query and target.suffix.lower() == '.md':
@@ -3270,7 +3496,8 @@ async def _serve_file(request, target):
                   else '<a class="nav-off">← poprzednie</a>')
         a_next = (f'<a href="{nxt}" id="next">następne →</a>' if nxt
                   else '<a class="nav-off">następne →</a>')
-        crop_btn = ('' if target.suffix.lower() == '.svg'
+        crop_btn = ('' if (target.suffix.lower() == '.svg' or KONF.tylko_odczyt
+                           or not KONF.modul('kadrowanie'))
                     else '<a href="#" id="cropb" title="Przytnij obszar (np. do kartki)">'
                          '✂ przytnij</a>')
         html = (
@@ -3341,12 +3568,36 @@ async def _serve_file(request, target):
     return web.FileResponse(target, headers=headers)
 
 
+def _katalogi_sprzatania() -> list:
+    """Katalogi, w których serwer sam zapisuje (a więc może zostawić odpadki):
+    zapis dozwolony → katalog główny (z katalogiem lektora w środku);
+    tylko odczyt → katalog lektora i katalog danych. Bez zagnieżdżonych dubli."""
+    if not KONF.tylko_odczyt:
+        kand = [ROOT]
+    else:
+        kand = ([Path(KONF.katalog_lektora)] if KONF.katalog_lektora else []) \
+            + [Path(KONF.katalog_danych)]
+    kand = [d.resolve() for d in kand if d.is_dir()]
+    return [d for d in kand
+            if not any(o != d and o in d.parents for o in kand)]
+
+
+def _pliki_sprzatania():
+    """Pliki katalogów sprzątania; błąd odczytu katalogu nie wywraca startu."""
+    for d in _katalogi_sprzatania():
+        try:
+            yield from list(d.rglob('*'))
+        except OSError:
+            continue
+
+
 async def _cleanup_parts(app):
     """Self-clean przy starcie (po _lektor_restore — kolejka już wczytana):
       • orphany .part (przerwane uploady),
       • transientne .wav lektora (nieudana konwersja mp3->flac),
       • PORZUCONE partiale lektora (_lektor.mp3 + sidecary) — ALE TYLKO gdy nie
-        mają aktywnego zadania w kolejce (te z zadaniem ZOSTAJĄ do wznowienia)."""
+        mają aktywnego zadania w kolejce (te z zadaniem ZOSTAJĄ do wznowienia).
+    Przeszukuje tylko katalogi z zapisem (_katalogi_sprzatania)."""
     import time
     import subprocess
     # czy JAKIŚ lektor aktualnie generuje (agent/CLI poza serwerem)? w razie
@@ -3364,48 +3615,72 @@ async def _cleanup_parts(app):
             pass
     now = time.time()
     removed = 0
-    try:
-        for p in ROOT.rglob('*'):
-            try:
-                if '.kosz' in p.parts:            # NIE ruszaj kosza
+    for p in _pliki_sprzatania():
+        try:
+            if '.kosz' in p.parts:            # NIE ruszaj kosza
+                continue
+            n = p.name
+            if n.endswith('.part') or n.endswith('_lektor.wav'):
+                p.unlink(); removed += 1
+            elif n.endswith('_lektor.mp3.resume.json') and not gen:
+                # NIEUKOŃCZONY lektor (ma checkpoint). UKOŃCZONY mp3 NIE ma
+                # .resume.json -> nie trafia tu. Kasuj komplet tylko gdy brak
+                # aktywnego zadania i plik nie jest świeżo zapisywany.
+                stem = n[:-len('.mp3.resume.json')]     # <docstem>_lektor
+                if stem in active:
                     continue
-                n = p.name
-                if n.endswith('.part') or n.endswith('_lektor.wav'):
-                    p.unlink(); removed += 1
-                elif n.endswith('_lektor.mp3.resume.json') and not gen:
-                    # NIEUKOŃCZONY lektor (ma checkpoint). UKOŃCZONY mp3 NIE ma
-                    # .resume.json -> nie trafia tu. Kasuj komplet tylko gdy brak
-                    # aktywnego zadania i plik nie jest świeżo zapisywany.
-                    stem = n[:-len('.mp3.resume.json')]     # <docstem>_lektor
-                    if stem in active:
-                        continue
-                    mp3 = p.with_name(stem + '.mp3')
-                    if mp3.exists() and now - mp3.stat().st_mtime < 120:
-                        continue
-                    for suf in ('.mp3', '.mp3.resume.json', '.mp3.cues.json'):
-                        q = p.with_name(stem + suf)
-                        if q.exists():
-                            q.unlink(); removed += 1
-            except Exception:
-                pass
-    except Exception:
-        pass
+                mp3 = p.with_name(stem + '.mp3')
+                if mp3.exists() and now - mp3.stat().st_mtime < 120:
+                    continue
+                for suf in ('.mp3', '.mp3.resume.json', '.mp3.cues.json'):
+                    q = p.with_name(stem + suf)
+                    if q.exists():
+                        q.unlink(); removed += 1
+        except Exception:
+            pass
     if removed:
         _evlog('start', f'self-clean: usunięto {removed} niedokończonych plików')
 
 
-def main():
+def utworz_aplikacje(k):
+    """Aplikacja aiohttp dla ustawień instancji k (main() i testy)."""
+    global _LEKTOR_LOCK, _LEKTOR_PAUSED, _LEKTOR_SHUTDOWN
+    zastosuj_konfiguracje(k)
+    # stan kolejki lektora od zera (pętla zdarzeń nowa przy każdym starcie)
+    _LEKTOR_QUEUE.clear()
+    _LEKTOR_BLEDY.clear()
+    _LEKTOR_LOCK = None
+    _LEKTOR_PAUSED = False
+    _LEKTOR_SHUTDOWN = False
     # client_max_size: limit żądania POST (upload) — domyślny 1 MB to za mało
     app = web.Application(middlewares=[errlog, auth],
                           client_max_size=512 * 1024 ** 2)
-    _evlog('start', f'serwer wystartował na :{PORT}')
     app.on_startup.append(_lektor_restore)        # NAJPIERW wczytaj kolejkę
     app.on_startup.append(_cleanup_parts)         # potem sprzątaj porzucone
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)
     app.router.add_delete('/{path:.*}', delete_item)
+    return app
+
+
+def main():
+    """Start serwera: ustawienia → warunki startu → nasłuch. Każdy błąd
+    ustawień lub warunku startu = komunikat na stderr i kod 2 (bez startu)."""
+    try:
+        k = _konf.wczytaj()
+    except _konf.BladKonfiguracji as e:
+        print(f'AnberFiles: błąd ustawień — {e}', file=sys.stderr, flush=True)
+        sys.exit(2)
+    bledy = _konf.sprawdz_przy_starcie(k)
+    if bledy:
+        for b in bledy:
+            print(f'AnberFiles: ODMOWA STARTU — {b}', file=sys.stderr, flush=True)
+        sys.exit(2)
+    app = utworz_aplikacje(k)
+    _evlog('start', f'serwer wystartował na :{PORT} ({_konf.opis(k)})')
     auth_info = f'user={USER}' if PASSW else 'OPEN (no auth)'
-    print(f'sprawozdania-server: http://{HOST}:{PORT}/ — {auth_info}', flush=True)
+    print(f'AnberFiles [{k.nazwa_instancji}]: http://{HOST}:{PORT}/ — {auth_info}'
+          f' — {_konf.opis(k)}', flush=True)
     web.run_app(app, host=HOST, port=PORT, access_log=None)
 
 

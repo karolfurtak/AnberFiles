@@ -71,12 +71,13 @@ ale serwuje dowolne drzewo katalogów.
 
 **Bezpieczeństwo:**
 - HTTP Basic Auth (konfigurowany przez env; pusty `SERVER_PASS` = open access,
-  tylko do sieci prywatnych!)
+  tylko do sieci prywatnych!; przy `haslo_wymagane = tak` pusty `SERVER_PASS`
+  zatrzymuje start)
 - guard na path traversal (żądania nie wyjdą poza katalog główny)
 
 ## Wymagania
 
-- Python 3.10+, `aiohttp` (`pip install aiohttp`)
+- Python 3.10+ (sprawdzane w CI na 3.10 i 3.13), `pip install -r requirements.txt`
 - testowane na stock firmware Anbernic RG40XX V (Ubuntu 22.04, build 20251225) —
   ale działa na dowolnym Linuksie
 
@@ -89,12 +90,41 @@ ale serwuje dowolne drzewo katalogów.
 | `SERVER_USER` | `anbernic` | login Basic Auth |
 | `SERVER_PASS` | *(puste)* | hasło; **puste wyłącza auth** |
 
-Katalog główny: stała `ROOT` w `app/server.py` (domyślnie `/mnt/data/sprawozdania`).
+Zmienna środowiska wygrywa z plikiem ustawień, plik z wartością domyślną.
+
+## Ustawienia instancji (`ANBERFILES_CONF`)
+
+Jeden kod obsługuje kilka instancji (konsola Anbernic, Jarvis). Wszystkie ścieżki
+i przełączniki są w `app/konfiguracja.py`; plik ustawień instancji leży **poza
+repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
+
+- **Brak zmiennej = ustawienia konsoli Anbernic** (katalog `/mnt/data/sprawozdania`,
+  dane w `/mnt/data`, port 8765, wszystkie moduły włączone) — zachowanie jak dotąd.
+- Zmienna ustawiona, a pliku brak, nieznany klucz albo zła wartość = serwer nie startuje.
+- Sekcje: `[serwer]` (`nazwa_instancji`, `host`, `port`, `uzytkownik_www`,
+  `haslo_wymagane`, `tylko_odczyt`), `[katalogi]` (`katalog_glowny`, `katalog_danych`,
+  `katalog_lektora`, `katalog_eksportu`, pliki rejestru i błędów, pamięć podręczna
+  podglądu DOCX, katalog ZIP, favikona, kosz), `[moduly]` (`podglad_docx`,
+  `eksport_docx`, `lektor`, `lektor_opisy_ai`, `wylaczanie`, `druk`, `bateria`,
+  `kadrowanie` — `tak`/`nie`).
+- Hasło **tylko** w zmiennej `SERVER_PASS`, nigdy w pliku.
+- Przy starcie: brak hasła przy `haslo_wymagane = tak`, brak katalogu głównego albo
+  nieudana próba zapisu w katalogu danych = komunikat na stderr i kod wyjścia 2.
+- `tylko_odczyt = tak` → 403 na wgrywanie, usuwanie, zmianę nazwy, nowy katalog,
+  kadrowanie i eksport DOCX; lektor i jego kolejka działają. Przyciski tych akcji
+  znikają z interfejsu, podobnie przyciski wyłączonych modułów.
+- `katalog_lektora` (musi leżeć w katalogu głównym): nagrania trafiają do
+  `katalog_lektora/<ścieżka katalogu źródła>/<nazwa>_lektor.<fmt>` zamiast obok
+  dokumentu; podgląd `.md`, `?read` i ikona 🎧 w listingu je odnajdują.
+
+Przykłady: [`konfiguracja/jarvis.conf.przyklad`](konfiguracja/jarvis.conf.przyklad),
+[`konfiguracja/lektor-ustawienia.conf.przyklad`](konfiguracja/lektor-ustawienia.conf.przyklad).
 
 ## Instalacja jako usługa (systemd)
 
 ```bash
 scp app/server.py root@KONSOLA:/usr/local/bin/sprawozdania-server.py
+scp app/konfiguracja.py root@KONSOLA:/usr/local/bin/konfiguracja.py   # obok serwera
 
 cat > /etc/sprawozdania-server.env <<EOF
 SERVER_PASS=twoje_haslo

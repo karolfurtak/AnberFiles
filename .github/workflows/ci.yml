@@ -1,4 +1,5 @@
 name: CI
+run-name: "CI ${{ github.ref_name }}: ${{ github.event.head_commit.message || github.event.pull_request.title }}"
 on: [push, pull_request]
 jobs:
   lint:
@@ -9,5 +10,57 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install ruff aiohttp
-      - run: ruff check --select E9,F app/
-      - run: python -m py_compile app/server.py
+      - run: ruff check --select E9,F app/ tools/ tests/
+      - run: python -m py_compile app/server.py app/konfiguracja.py tools/czytaj_tts.py
+
+  testy:
+    name: testy (${{ matrix.instancja }}, Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - instancja: anbernic
+            python: '3.10'
+          - instancja: jarvis
+            python: '3.13'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -r requirements-dev.txt
+      - name: Ustawienia instancji Jarvis (przykład z katalogami tymczasowymi)
+        if: matrix.instancja == 'jarvis'
+        run: |
+          BAZA="$RUNNER_TEMP/anberfiles"
+          mkdir -p "$BAZA/korzen/lektor" "$BAZA/dane" "$BAZA/eksport"
+          sed "s#/srv/anberfiles#$BAZA#g" konfiguracja/jarvis.conf.przyklad > "$RUNNER_TEMP/jarvis.conf"
+          echo "ANBERFILES_CONF=$RUNNER_TEMP/jarvis.conf" >> "$GITHUB_ENV"
+          echo "SERVER_PASS=ci-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+      - name: Testy
+        run: python -m pytest tests -v
+      - name: Start serwera na ustawieniach instancji (401 bez hasła, 200 z hasłem)
+        if: matrix.instancja == 'jarvis'
+        run: |
+          python app/server.py > "$RUNNER_TEMP/serwer.log" 2>&1 &
+          PID=$!
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8790/ && break; sleep 0.5; done
+          BEZ=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/)
+          Z=$(curl -s -o /dev/null -w '%{http_code}' -u "karol:$SERVER_PASS" http://127.0.0.1:8790/)
+          kill $PID; cat "$RUNNER_TEMP/serwer.log"
+          echo "bez hasła: $BEZ, z hasłem: $Z"
+          test "$BEZ" = 401 && test "$Z" = 200
+      - name: Odmowa startu bez hasła
+        if: matrix.instancja == 'jarvis'
+        run: |
+          set +e
+          SERVER_PASS= timeout 20 python app/server.py 2> "$RUNNER_TEMP/err.log"
+          RC=$?
+          set -e
+          cat "$RUNNER_TEMP/err.log"
+          echo "kod wyjścia: $RC"
+          if [ "$RC" = 0 ] || [ "$RC" = 124 ]; then
+            echo "BŁĄD: serwer wystartował bez hasła"; exit 1
+          fi
+          grep "Brak hasła" "$RUNNER_TEMP/err.log"

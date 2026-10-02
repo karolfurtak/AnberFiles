@@ -1,0 +1,8 @@
+# Zależności serwera (app/) i lektora (tools/czytaj_tts.py)
+aiohttp
+markdown
+openpyxl
+python-docx
+Pillow
+edge-tts
+num2words

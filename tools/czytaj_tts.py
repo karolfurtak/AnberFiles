@@ -286,8 +286,11 @@ def _opisz_obraz(img: Path, kontekst: str, cfg: dict) -> str:
               f'lektora osobie, która obrazu nie widzi — opisuj co widać '
               f'(elementy, relacje, wartości), bez zwrotów typu „na obrazku". '
               f'Zwróć WYŁĄCZNIE tekst opisu po polsku, bez nagłówków i uwag.')
-    env = dict(os.environ, HOME='/root', IS_SANDBOX='1',
-               PATH='/root/.local/bin:/usr/local/bin:/usr/bin:/bin')
+    # katalog domowy programu `claude` (logowanie modelu): lektor-ustawienia.conf
+    # `home_opisow = ...`; domyślnie /root jak na konsoli
+    home = cfg.get('home_opisow', '').strip() or '/root'
+    env = dict(os.environ, HOME=home, IS_SANDBOX='1',
+               PATH=f'{home}/.local/bin:/usr/local/bin:/usr/bin:/bin')
     try:
         r = subprocess.run(
             ['claude', '--dangerously-skip-permissions', '-p', prompt],

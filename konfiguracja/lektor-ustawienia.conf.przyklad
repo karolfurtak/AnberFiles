@@ -1,0 +1,10 @@
+# Ustawienia lektora (tools/czytaj_tts.py) — przykład dla instancji bez karty TF konsoli.
+# Plik leży obok czytaj_tts.py w katalogu eksportu (klucz katalog_eksportu).
+# Format: klucz = wartość, komentarz po #.
+
+format         = mp3      # mp3 | wav | flac (wav/flac wymagają mpg123 i flac)
+voice          = marek
+rate           = +0%
+kopiuj_do      = nie      # brak biblioteki Music konsoli — bez kopii
+opisuj_grafiki = nie      # opisy ilustracji modelem wizyjnym wyłączone
+# home_opisow  = /root    # katalog domowy dla programu opisującego ilustracje
