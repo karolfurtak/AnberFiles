@@ -39,7 +39,8 @@ MODULY = ('podglad_docx', 'eksport_docx', 'lektor', 'lektor_opisy_ai',
 KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
-               'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu'),
+               'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
+               'limit_zip_mb'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -80,6 +81,7 @@ class Konfiguracja:
     zrodlo: str = 'domyślne (Anbernic)'
     logowanie: str = 'basic'
     limit_wgrywania_mb: int = 512        # łączny rozmiar jednego wgrywania (413 ponad)
+    limit_zip_mb: int = 2048             # łączny rozmiar plików folderu w ?zip=1 (413 ponad)
     prog_pamieci_mb: int = 400           # serwer + procesy potomne: ostrzeżenie w rejestrze
     # sieci, z których ekran „Ustaw hasło" przyjmuje hasło BEZ tokenu startowego
     # (domyślnie żadne — token wymagany od wszystkich)
@@ -238,6 +240,7 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         limit_wgrywania_mb=_dodatnia('limit_wgrywania_mb',
                                      s.get('limit_wgrywania_mb', '512')),
         prog_pamieci_mb=_dodatnia('prog_pamieci_mb', s.get('prog_pamieci_mb', '400')),
+        limit_zip_mb=_dodatnia('limit_zip_mb', s.get('limit_zip_mb', '2048')),
         ustaw_haslo_bez_tokenu=_sieci('ustaw_haslo_bez_tokenu',
                                       s.get('ustaw_haslo_bez_tokenu', '')),
     )

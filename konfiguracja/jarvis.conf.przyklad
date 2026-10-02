@@ -28,6 +28,7 @@ tylko_odczyt    = tak            ; wgrywanie, usuwanie, zmiana nazwy, nowy katal
 # Ograniczenie do sieci prywatnych i Tailscale obowiązuje zawsze, także z tokenem.
 ustaw_haslo_bez_tokenu =
 limit_wgrywania_mb = 512        ; łączny rozmiar jednego wgrywania plików (MB), ponad → 413
+limit_zip_mb    = 2048           ; łączny rozmiar plików folderu pobieranego jako ZIP (MB), ponad → 413
 prog_pamieci_mb = 400            ; serwer + procesy potomne (soffice, lektor): ostrzeżenie w rejestrze zdarzeń
 
 [katalogi]

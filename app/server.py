@@ -2476,23 +2476,49 @@ FAVICON_LINK = ('<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
 _ZIP_LOCK = asyncio.Lock()   # jeden zip naraz (A53: I/O + RAM)
 
 
-def _build_zip(target: Path, out_path: str):
+class _ZipZaDuzy(Exception):
+    """Łączny rozmiar plików folderu przekracza limit_zip_mb."""
+
+
+def _pliki_do_zip(target: Path, limit_b: int) -> list:
+    """[(plik, nazwa w archiwum)] — bez dowiązań symbolicznych, tylko pliki,
+    których rzeczywista ścieżka leży w pakowanym katalogu (a więc w ROOT);
+    pomija .kosz, dotfiles, .part i sidecary. Suma rozmiarów > limit_b →
+    _ZipZaDuzy, ZANIM cokolwiek zostanie zapisane."""
+    target = target.resolve()
+    base = target.name
+    wynik, razem = [], 0
+    for f in sorted(target.rglob('*')):
+        try:
+            if f.is_symlink() or not f.is_file():
+                continue
+            relparts = f.relative_to(target).parts
+            if '.kosz' in f.parts or any(p.startswith('.') for p in relparts):
+                continue
+            if f.name.endswith(('.part', '.meta.json', '.resume.json')):
+                continue
+            rzecz = f.resolve()
+            if target not in rzecz.parents or ROOT not in rzecz.parents:
+                continue                   # dowiązanie wyżej w ścieżce → poza katalog
+            razem += f.stat().st_size
+        except (OSError, ValueError):
+            continue
+        if razem > limit_b:
+            raise _ZipZaDuzy(razem)
+        wynik.append((f, base + '/' + '/'.join(relparts)))
+    return wynik
+
+
+def _build_zip(target: Path, out_path: str, limit_b: int):
     """Pakuje rekurencyjnie zawartość katalogu do out_path (synchronicznie — wołane
     w executorze, by nie blokować pętli). ZIP_STORED: bez rekompresji (zdjęcia i tak
-    skompresowane; szybciej na A53). Pomija .kosz, dotfiles, .part i sidecary."""
+    skompresowane; szybciej na A53). Lista plików i limit: _pliki_do_zip."""
     import zipfile
-    base = target.name
+    pliki = _pliki_do_zip(target, limit_b)
     with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_STORED, allowZip64=True) as zf:
-        for f in sorted(target.rglob('*')):
+        for f, nazwa in pliki:
             try:
-                if not f.is_file():
-                    continue
-                relparts = f.relative_to(target).parts
-                if '.kosz' in f.parts or any(p.startswith('.') for p in relparts):
-                    continue
-                if f.name.endswith(('.part', '.meta.json', '.resume.json')):
-                    continue
-                zf.write(f, base + '/' + '/'.join(relparts))
+                zf.write(f, nazwa)
             except (OSError, ValueError):
                 continue
 
@@ -2516,9 +2542,16 @@ async def _zip_dir(request, target: Path):
     fd, tmppath = tempfile.mkstemp(suffix='.zip', dir=str(tmpdir))
     os.close(fd)
     try:
-        async with _ZIP_LOCK:
-            await asyncio.get_event_loop().run_in_executor(
-                None, _build_zip, target, tmppath)
+        try:
+            async with _ZIP_LOCK:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _build_zip, target, tmppath, KONF.limit_zip_mb * 1024 ** 2)
+        except _ZipZaDuzy as e:
+            _evlog('zip', f'odrzucono {target.relative_to(ROOT)}: ponad '
+                   f'{KONF.limit_zip_mb} MB (co najmniej {e.args[0] >> 20} MB)', level='warn')
+            return web.Response(status=413, text=f'413 — folder większy niż '
+                                f'{KONF.limit_zip_mb} MB (limit_zip_mb w ustawieniach); '
+                                'pobierz mniejszy podkatalog.')
         size = os.path.getsize(tmppath)
         resp = web.StreamResponse(headers={
             'Content-Type': 'application/zip',

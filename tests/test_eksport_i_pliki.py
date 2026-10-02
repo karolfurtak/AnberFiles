@@ -2,6 +2,11 @@
 niedostępne po adresie (C1), ZIP folderu bez dowiązań i z limitem (C2).
 
 Testy budują własne drzewo w tmp_path (ustawienia konsoli Anbernic)."""
+import io
+import os
+import sys
+import zipfile
+
 import aiohttp
 import pytest
 
@@ -164,3 +169,65 @@ def test_zwykly_plik_200(tmp_path):
     st_a, tresc, st_b, lst = uruchom(k, sc)
     assert st_a == 200 and tresc == 'jawny'
     assert st_b == 200 and 'jawny.txt' in lst and '.ukryty' not in lst
+
+
+# ── C2: ZIP folderu ──────────────────────────────────────────────────────────
+
+def _symlink_albo_pomin(cel, link, katalog=False):
+    try:
+        os.symlink(cel, link, target_is_directory=katalog)
+    except (OSError, NotImplementedError) as e:
+        if sys.platform == 'win32':
+            pytest.skip(f'brak uprawnień do dowiązań na Windows: {e}')
+        raise
+
+
+def _zip(k, adres='/paczka/?zip=1'):
+    async def sc(cl):
+        r = await cl.get(adres, auth=AU)
+        return r.status, await r.read()
+    return uruchom(k, sc)
+
+
+def test_zip_pomija_dowiazania_poza_katalog(tmp_path):
+    korzen = tmp_path / 'sprawozdania'
+    (korzen / 'paczka').mkdir(parents=True)
+    (korzen / 'paczka' / 'zwykly.txt').write_text('zwykly', encoding='utf-8')
+    sekret = tmp_path / 'sekret.txt'
+    sekret.write_text('TAJNE-POZA-KORZENIEM', encoding='utf-8')
+    (tmp_path / 'obcy').mkdir()
+    (tmp_path / 'obcy' / 'plik.txt').write_text('TAJNE-KATALOG', encoding='utf-8')
+    _symlink_albo_pomin(sekret, korzen / 'paczka' / 'link.txt')
+    _symlink_albo_pomin(tmp_path / 'obcy', korzen / 'paczka' / 'linkdir', katalog=True)
+    k = _anbernic(tmp_path)
+    st, dane = _zip(k)
+    assert st == 200
+    with zipfile.ZipFile(io.BytesIO(dane)) as zf:
+        nazwy = zf.namelist()
+        tresci = b''.join(zf.read(n) for n in nazwy)
+    assert 'paczka/zwykly.txt' in nazwy                 # kontrola: zwykły plik jest
+    assert not any('link' in n for n in nazwy), nazwy
+    assert b'TAJNE' not in tresci
+
+
+def test_zip_ponad_limit_413(tmp_path):
+    korzen = tmp_path / 'sprawozdania'
+    (korzen / 'paczka').mkdir(parents=True)
+    (korzen / 'paczka' / 'duzy.bin').write_bytes(b'a' * (2 * 1024 * 1024))
+    k = _anbernic(tmp_path, 'limit_zip_mb = 1')
+    st, _ = _zip(k)
+    assert st == 413
+    assert not list(k.katalog_zip_tmp.glob('*.zip'))     # plik tymczasowy sprzątnięty
+
+
+def test_zip_ponizej_limitu_200(tmp_path):
+    """Kontrola rozróżniająca: ten sam katalog przy domyślnym limicie (2 GiB)."""
+    korzen = tmp_path / 'sprawozdania'
+    (korzen / 'paczka').mkdir(parents=True)
+    (korzen / 'paczka' / 'duzy.bin').write_bytes(b'a' * (2 * 1024 * 1024))
+    k = _anbernic(tmp_path)
+    assert k.limit_zip_mb == 2048
+    st, dane = _zip(k)
+    assert st == 200
+    with zipfile.ZipFile(io.BytesIO(dane)) as zf:
+        assert zf.read('paczka/duzy.bin') == b'a' * (2 * 1024 * 1024)

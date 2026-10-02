@@ -127,6 +127,9 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   serwera i jego procesów potomnych (soffice, lektor) z `/proc`; nowy szczyt (wzrost
   o co najmniej 10 %) i przekroczenie progu (najwyżej raz na 10 min, poziom `warn`)
   trafiają do rejestru zdarzeń; stan „Pamięć: teraz / szczyt / próg" w nagłówku `/?events=1`.
+  `limit_zip_mb` (domyślnie 2048) — łączny rozmiar plików folderu pobieranego jako ZIP
+  (`?zip=1`), ponad → 413 przed zapisem archiwum; ZIP pomija dowiązania symboliczne
+  i pliki, których rzeczywista ścieżka wychodzi poza pakowany katalog.
 - `tylko_odczyt = tak` → 403 na wgrywanie, usuwanie, zmianę nazwy, nowy katalog,
   kadrowanie i eksport DOCX; lektor i jego kolejka działają. Przyciski tych akcji
   znikają z interfejsu, podobnie przyciski wyłączonych modułów.
