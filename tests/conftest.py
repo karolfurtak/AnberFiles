@@ -27,7 +27,7 @@ import argparse, json, sys
 from pathlib import Path
 ap = argparse.ArgumentParser()
 ap.add_argument('input'); ap.add_argument('-o', '--output')
-ap.add_argument('--format'); ap.add_argument('--opisy')
+ap.add_argument('--format'); ap.add_argument('--opisy'); ap.add_argument('--silnik')
 a = ap.parse_args()
 (Path(__file__).parent / 'ostatnie_argv.txt').write_text(' '.join(sys.argv[1:]), encoding='utf-8')
 out = Path(a.output)

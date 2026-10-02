@@ -231,6 +231,9 @@ AUDIO_MIME = {'.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.wav': 'audio/wav',
 # katalog_lektora/<ścieżka względna katalogu źródła>/ (gdy ustawiony).
 # Preferuj FLAC > MP3 > ...
 LEKTOR_AUDIO_EXT = ('.flac', '.mp3', '.wav', '.ogg', '.m4a', '.opus')
+LEKTOR_ZRODLA = ('.md', '.docx', '.txt')        # dokumenty, które lektor czyta
+LEKTOR_SILNIKI = ('edge', 'piper')              # silniki mowy czytaj_tts.py
+LEKTOR_UWAGA_EDGE = 'Silnik edge: tekst opuszcza urządzenie (usługa Microsoft).'
 
 
 def _lektor_dir_for(target: Path):
@@ -1331,6 +1334,7 @@ def render_md_page(target: Path) -> str:
            if KONF.modul('eksport_docx') and not KONF.tylko_odczyt else '')
         + (f'<a href="#" id="prn" data-n="{q}">🖨 drukuj</a>'
            if KONF.modul('druk') else '')
+        + _lektor_przycisk(target, aud)
         + '</div>'
         '<div id="docxprog" class="docxprog"><span class="dpt"></span>'
         '<div class="dptrack"><div class="dpbar"></div></div></div>'
@@ -1530,10 +1534,10 @@ LEKTOR_BAR_JS = (
     '})();</script>'
 )
 
-# Akcje plikowe: 🗑 usuń (→.kosz), ✎ zmień nazwę (prompt → POST ?rename=),
-# ⧉ kopiuj nazwę do schowka.
-DEL_JS = (
-    '<script>' + JS_ESC +
+# Okno wyboru lektora (format, opisy ilustracji, silnik mowy) — wspólne dla
+# 🔊 w liście folderu i przycisku w podglądzie dokumentu. Wymaga JS_ESC.
+# Domyślny silnik podaje strona: window._LEK_SILNIK (z lektor-ustawienia.conf).
+LEKTOR_WYBOR_JS = (
     # modal wyboru formatu — RADIOBUTTONY per format + Generuj/Anuluj
     'function pickFmt(name){return new Promise(res=>{'
     'const ov=document.createElement("div");'
@@ -1554,21 +1558,30 @@ DEL_JS = (
     '<input type="radio" name="\'+nm+\'" value="\'+v+\'"\'+(v===""?" checked":"")'
     '+\' style="accent-color:#1a5fb4;width:1.05em;height:1.05em">\'+l'
     '+\'</label>\';}return h;}'
-    'const radios=mkradios(opts,"lfmt"),dradios=mkradios(dopts,"lopis");'
+    'const sopts=[["","⚙ wg ustawień lektora ("+(window._LEK_SILNIK'
+    '||"Piper, gdy usługa działa; inaczej Edge")+")"],'
+    '["piper","Piper — lokalnie, bez internetu"],'
+    '["edge","Edge — głosy online Microsoftu (internet)"]];'
+    'const radios=mkradios(opts,"lfmt"),dradios=mkradios(dopts,"lopis"),'
+    'sradios=mkradios(sopts,"lsil");'
     'ov.innerHTML=\'<div style="background:#fff;border-radius:10px;'
     'padding:1.1em 1.4em;max-width:92vw;min-width:300px;'
     'box-shadow:0 8px 30px rgba(0,0,0,.35)">'
     '<div style="font-weight:600;margin-bottom:.35em;word-break:break-all">'
     '🔊 Lektor: \'+esc(name)+\'</div>'
-    # silnik edge wysyła tekst do Microsoftu — napis z ustawień lektora (B8)
-    '\'+(window._LEK_UWAGA?\'<div class="lek-uwaga" style="color:#9a5b00;'
-    'font-size:.88em;margin-bottom:.6em">⚠ \'+esc(window._LEK_UWAGA)+\'</div>\':"")+\''
+    # silnik edge wysyła tekst do Microsoftu — napis z ustawień lektora (B8);
+    # treść ustawia lsw() wg wybranego silnika (domyślny: window._LEK_UWAGA)
+    '<div class="lek-uwaga" id="lekwarn" style="display:none;color:#9a5b00;'
+    'font-size:.88em;margin-bottom:.6em;max-width:30em"></div>'
     '<div style="color:#556;font-size:.9em;margin-bottom:.7em">'
     'Format nagrania (generacja dłuższych dokumentów może potrwać '
     'kilkanaście minut):</div>\'+radios+(window._LEK_OPISY===false?"":'
     '\'<div style="color:#556;font-size:.9em;margin:.8em 0 .3em;'
     'border-top:1px solid #e4e8ee;padding-top:.7em">'
     '🖼 Opisy ilustracji (model wizyjny):</div>\'+dradios)+'
+    '\'<div style="color:#556;font-size:.9em;margin:.8em 0 .3em;'
+    'border-top:1px solid #e4e8ee;padding-top:.7em">'
+    '🗣 Głos (silnik mowy):</div>\'+sradios+'
     '\'<div style="display:flex;gap:.6em;margin-top:1em;'
     'justify-content:flex-end">'
     '<button data-a="x">Anuluj</button>'
@@ -1580,10 +1593,26 @@ DEL_JS = (
     '+(b.dataset.a==="x"?";background:#f2f5f9":"");'
     'b.onclick=()=>{const v=ov.querySelector("input[name=lfmt]:checked");'
     'const d=ov.querySelector("input[name=lopis]:checked");'
+    'const sl=ov.querySelector("input[name=lsil]:checked");'
     'ov.remove();res(b.dataset.a==="ok"'
-    '?{fmt:(v?v.value:""),opisy:(d?d.value:"")}:null);};});'
+    '?{fmt:(v?v.value:""),opisy:(d?d.value:""),silnik:(sl?sl.value:"")}:null);};});'
+    # napis „tekst opuszcza urządzenie": wybrany edge → zawsze; Piper → brak;
+    # wg ustawień → window._LEK_UWAGA (z lektor-ustawienia.conf, B8)
+    'function lsw(){const sl=ov.querySelector("input[name=lsil]:checked");'
+    'const v=(sl&&sl.value)||"",w=ov.querySelector("#lekwarn");'
+    'const t=v==="piper"?"":(v==="edge"?' + _json_do_script(LEKTOR_UWAGA_EDGE)
+    + ':(window._LEK_UWAGA||""));'
+    'w.textContent=t?"⚠ "+t:"";w.style.display=t?"block":"none";}'
+    'ov.querySelectorAll("input[name=lsil]").forEach(i=>i.onchange=lsw);lsw();'
     'ov.onclick=e=>{if(e.target===ov){ov.remove();res(null);}};'
     'document.body.appendChild(ov);});}'
+)
+
+
+# Akcje plikowe: 🗑 usuń (→.kosz), ✎ zmień nazwę (prompt → POST ?rename=),
+# ⧉ kopiuj nazwę do schowka, 🔊 lektor (okno wyboru: LEKTOR_WYBOR_JS).
+DEL_JS = (
+    '<script>' + JS_ESC + LEKTOR_WYBOR_JS +
     'document.addEventListener("click",async e=>{'
     'const a=e.target.closest("a.del,a.ren,a.cpy,a.lek");if(!a)return;'
     'e.preventDefault();'
@@ -1594,7 +1623,7 @@ DEL_JS = (
     'a.textContent="⏳";'
     'try{'
     'let u=a.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
-    '+(fm.opisy?"&opisy="+fm.opisy:"");'
+    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
     'let r=await fetch(u,{method:"POST"});'
     'let j=await r.json().catch(()=>({}));'
     'if(j.status==="busy"){'
@@ -1640,6 +1669,62 @@ DEL_JS = (
     '}catch(err){alert("Błąd usuwania");}'
     '});</script>'
 )
+
+# Przycisk lektora w PODGLĄDZIE dokumentu (.md, .docx): okno wyboru → POST
+# ?lektor=1 → stan zadania z ?lektorqj co 2 s → po zakończeniu przeładowanie
+# strony (pojawia się odtwarzacz). Działa także w trybie tylko do odczytu —
+# nagranie trafia wtedy do katalogu lektora instancji.
+LEKTOR_PODGLAD_JS = (
+    '<script>' + JS_ESC + LEKTOR_WYBOR_JS +
+    '(function(){'
+    'const b=document.getElementById("lekgen");if(!b)return;'
+    'const st=document.getElementById("lekst"),lab=b.textContent;'
+    'function koniec(t){st.textContent=t;b.textContent=lab;delete b.dataset.busy;}'
+    'async function sledz(id,out){for(;;){'
+    'await new Promise(r=>setTimeout(r,2000));let d;'
+    'try{d=await(await fetch("?lektorqj=1",{cache:"no-store"})).json();}'
+    'catch(e){continue;}'
+    'const j=(d.jobs||[]).find(x=>id!=null?x.id===id:x.out===out);'
+    'if(!j){const bl=(d.bledy||[]).find(x=>id!=null?x.id===id:x.out===out);'
+    'if(bl){koniec("❌ "+bl.blad);return;}'
+    'st.textContent="✓ gotowe";location.reload();return;}'
+    'st.textContent=j.state==="running"?"🔊 "+(j.pct||0)+"%":"⏳ w kolejce";}}'
+    'b.onclick=async e=>{e.preventDefault();if(b.dataset.busy)return;'
+    'const fm=await pickFmt(decodeURIComponent(b.dataset.n));if(fm===null)return;'
+    'b.dataset.busy="1";b.textContent="⏳";'
+    'try{const u=b.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
+    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
+    'let r=await fetch(u,{method:"POST"});let j=await r.json().catch(()=>({}));'
+    'if(j.status==="busy"){'
+    'if(!confirm("Lektor jest teraz zajęty — czyta inny dokument."'
+    '+(j.pending?"\\nW kolejce czeka: "+j.pending+" plik(ów).":"")'
+    '+"\\n\\nDopisać ten dokument do kolejki?")){koniec("");return;}'
+    'r=await fetch(u+"&queue=1",{method:"POST"});j=await r.json().catch(()=>({}));}'
+    'if(r.status===202||j.status==="duplikat"){'
+    'st.textContent=j.status==="queued"?"⏳ w kolejce":"🔊 0%";'
+    'sledz(j.id!=null?j.id:null,j.out);}'
+    'else{koniec("❌ "+(j.blad||j.status||("HTTP "+r.status)));}'
+    '}catch(err){koniec("❌ błąd lektora");}};'
+    '})();</script>'
+)
+
+
+def _lektor_przycisk(target: Path, aud) -> str:
+    """Przycisk 🔊 lektora do paska podglądu dokumentu + skrypt; pusty, gdy
+    moduł lektora wyłączony. Domyślny silnik i napis o edge z
+    lektor-ustawienia.conf (_lektor_silnik, _lektor_uwaga_js)."""
+    if not KONF.modul('lektor') or target.suffix.lower() not in LEKTOR_ZRODLA:
+        return ''
+    q = quote(target.name)
+    tytul = ('Nagraj ponownie lektorem (wybór formatu i głosu)' if aud is not None
+             else 'Przeczytaj lektorem — wygeneruj nagranie (wybór formatu i głosu)')
+    return (f'<a href="#" id="lekgen" data-n="{q}" title="{tytul}">'
+            + ('🔊 lektor ↻' if aud is not None else '🔊 lektor') + '</a>'
+            '<span id="lekst" style="color:#6fce8f;font-size:.9em"></span>'
+            f'<script>window._LEK_SILNIK={_json_do_script(_lektor_silnik())};'
+            + ('' if KONF.modul('lektor_opisy_ai') else 'window._LEK_OPISY=false;')
+            + '</script>' + _lektor_uwaga_js() + LEKTOR_PODGLAD_JS)
+
 
 # Drag & drop upload — upuszczenie plików na listing wgrywa je do bieżącego
 # katalogu (POST multipart); tabela odświeży się sama (auto-refresh).
@@ -2705,7 +2790,7 @@ def _lektor_save_queue():
             'paused': _LEKTOR_PAUSED,
             'shutdown': _LEKTOR_SHUTDOWN,
             'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt'],
-                      'opisy': j.get('opisy', '')}
+                      'opisy': j.get('opisy', ''), 'silnik': j.get('silnik', '')}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
             ensure_ascii=False))
     except Exception:
@@ -2735,10 +2820,10 @@ async def _lektor_restore(app):
                 and _ext_lektor_running():
             continue   # już generowane przez osierocony/zewnętrzny proces
         _lektor_new_job(it['src'], Path(it['out']), it['fmt'],
-                        it.get('opisy', ''))
+                        it.get('opisy', ''), it.get('silnik', ''))
 
 
-def _lektor_new_job(src, out, fmt, opisy='') -> dict:
+def _lektor_new_job(src, out, fmt, opisy='', silnik='') -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
     do następnego" przy pauzie)."""
     global _LEKTOR_SEQ, _LEKTOR_LOCK
@@ -2747,7 +2832,7 @@ def _lektor_new_job(src, out, fmt, opisy='') -> dict:
     _LEKTOR_SEQ += 1
     import time as _t
     job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
-           'opisy': opisy, 'state': 'queued', 'cancelled': False,
+           'opisy': opisy, 'silnik': silnik, 'state': 'queued', 'cancelled': False,
            'proc': None, 'started': _t.time()}
     _LEKTOR_QUEUE.append(job)
     _lektor_save_queue()
@@ -2824,6 +2909,8 @@ async def _lektor_run(job: dict):
                    '--format', job['fmt']]
             if job.get('opisy') in ('tak', 'nie'):
                 cmd += ['--opisy', job['opisy']]
+            if job.get('silnik') in LEKTOR_SILNIKI:      # brak = wg ustawień lektora
+                cmd += ['--silnik', job['silnik']]
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -3134,7 +3221,7 @@ def _lektor_uwaga_silnika() -> str:
     if s == 'piper':
         return ''
     if s == 'edge' or s:
-        return 'Silnik edge: tekst opuszcza urządzenie (usługa Microsoft).'
+        return LEKTOR_UWAGA_EDGE
     return ('Silnik: lokalny Piper, gdy usługa działa; inaczej edge — wtedy tekst '
             'opuszcza urządzenie (usługa Microsoft).')
 
@@ -3143,6 +3230,13 @@ def _lektor_uwaga_js() -> str:
     import json
     u = _lektor_uwaga_silnika()
     return f'<script>window._LEK_UWAGA={json.dumps(u)};</script>' if u else ''
+
+
+def _lektor_silnik() -> str:
+    """Silnik z lektor-ustawienia.conf (edge|piper); '' = brak linii, wtedy
+    czytaj_tts.py wybiera sam (Piper, gdy usługa odpowiada, inaczej edge)."""
+    v = _lektor_conf('silnik').lower()
+    return v if v in LEKTOR_SILNIKI else ''
 
 
 def _docx_to_txt(p: Path) -> Path:
@@ -3287,9 +3381,14 @@ async def lektor_item(request):
         opisy = ''
     if not KONF.modul('lektor_opisy_ai'):
         opisy = 'nie'                     # model wizyjny wyłączony w ustawieniach
-    _lektor_new_job(src, out, fmt, opisy)
+    # silnik mowy: edge (online, tekst wychodzi z urządzenia) | piper (lokalnie);
+    # brak albo nieznana wartość = wg lektor-ustawienia.conf
+    silnik = request.query.get('silnik', '')
+    if silnik not in LEKTOR_SILNIKI:
+        silnik = ''
+    job = _lektor_new_job(src, out, fmt, opisy, silnik)
     return web.json_response(
-        {'status': 'queued' if queued else 'start',
+        {'status': 'queued' if queued else 'start', 'id': job['id'],
          'out': out.name, 'position': len(_LEKTOR_QUEUE)}, status=202)
 
 
@@ -3383,7 +3482,7 @@ async def lektor_pause(request):
             except ProcessLookupError:
                 pass
         nj = _lektor_new_job(job['src'], Path(job['out']), job['fmt'],
-                             job.get('opisy', ''))
+                             job.get('opisy', ''), job.get('silnik', ''))
         return web.json_response({'skipped': jid, 'requeued_as': nj['id']})
     # hold
     if job.get('proc') is not None and job['state'] == 'running':
@@ -3807,6 +3906,7 @@ async def _serve_file(request, target):
                'border-color:#2f6b46">📖 śledź tekst</a>' if cue
                else ('<span style="color:#6fce8f">🔊 lektor</span>'
                      if aud else ''))
+            + _lektor_przycisk(target, aud)
             + f'<a href="{q}?dl=1" style="margin-left:auto">⬇ DOCX</a></div>'
             + audio_html
             + '<div class="pvw">'
