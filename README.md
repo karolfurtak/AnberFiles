@@ -151,6 +151,14 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   - formularze logowania i „Ustaw hasło" (zwykły formularz HTML, działa bez JS
     i z menedżerem haseł) zamiast nagłówka sprawdzają `Origin`: obecny musi wskazywać
     ten sam host:port co `Host`, inaczej 403.
+- `soffice_bez_sieci` (`[serwer]`, `auto`/`tak`/`nie`, domyślnie `auto`) — LibreOffice
+  (podgląd DOCX, druk) uruchamiany w piaskownicy bez sieci (`bwrap --unshare-net`, a gdy
+  go brak — `unshare -n`), żeby pole `INCLUDEPICTURE http://…` w dokumencie nie kazało
+  serwerowi pobierać adresów. Wykrycie raz na start (próbne `true` w piaskownicy);
+  `auto` bez działającej piaskownicy = zwykły `soffice` i jedno ostrzeżenie w rejestrze
+  zdarzeń, `tak` = podgląd DOCX i druk odmawiają konwersji. Wymaga `bubblewrap`
+  (`apt install bubblewrap`); jednostka systemd z `RestrictNamespaces=yes` blokuje
+  przestrzenie nazw — dla bwrap potrzebne `RestrictNamespaces=user net mnt`.
 - `katalog_lektora` (musi leżeć w katalogu głównym): nagrania trafiają do
   `katalog_lektora/<ścieżka katalogu źródła>/<nazwa>_lektor.<fmt>` zamiast obok
   dokumentu; podgląd `.md`, `?read` i ikona 🎧 w listingu je odnajdują.

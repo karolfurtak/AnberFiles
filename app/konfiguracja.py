@@ -40,7 +40,7 @@ KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
-               'limit_zip_mb', 'dozwolone_hosty'),
+               'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -89,6 +89,9 @@ class Konfiguracja:
     # nazwy w nagłówku Host przyjmowane oprócz literałów IP, localhost i *.local
     # (B9, DNS rebinding); wpis z kropką na początku = sufiks (np. .ts.net)
     dozwolone_hosty: tuple = ()
+    # LibreOffice w piaskownicy bez sieci (C9): auto = gdy się da (bwrap,
+    # unshare -n), tak = wymagane (bez piaskownicy brak konwersji), nie = nigdy
+    soffice_bez_sieci: str = 'auto'
 
     @property
     def katalog_auth(self) -> Path:
@@ -155,6 +158,18 @@ def _sieci(klucz: str, tekst: str) -> tuple:
             raise BladKonfiguracji(f'[serwer] {klucz}: {s!r} nie jest adresem '
                                    'ani siecią (np. 192.168.0.0/16)') from None
     return tuple(wynik)
+
+
+def _tak_nie_auto(klucz: str, tekst: str) -> str:
+    t = tekst.strip().lower()
+    if t == 'auto':
+        return t
+    if t in _TAK:
+        return 'tak'
+    if t in _NIE:
+        return 'nie'
+    raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: dozwolone „tak", „nie" '
+                           'albo „auto"')
 
 
 def _hosty(tekst: str) -> tuple:
@@ -261,6 +276,8 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         ustaw_haslo_bez_tokenu=_sieci('ustaw_haslo_bez_tokenu',
                                       s.get('ustaw_haslo_bez_tokenu', '')),
         dozwolone_hosty=_hosty(s.get('dozwolone_hosty', '')),
+        soffice_bez_sieci=_tak_nie_auto('soffice_bez_sieci',
+                                        s.get('soffice_bez_sieci', 'auto')),
     )
 
 

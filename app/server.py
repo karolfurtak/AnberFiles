@@ -919,14 +919,15 @@ async def docx_to_pdf(target: Path) -> Path | None:
             old_f.unlink()
         except Exception:
             pass
+    cmd = polecenie_soffice('--headless', profil_lo('lo-profil-podglad'),
+                            '--convert-to', 'pdf', '--outdir', str(DOCX_CACHE), str(target))
+    if cmd is None:                      # soffice_bez_sieci = tak, piaskownicy brak
+        return None
     async with _LO_LOCK:
         if cached.exists():
             return cached
         proc = await asyncio.create_subprocess_exec(
-            'soffice', '--headless',
-            profil_lo('lo-profil-podglad'),
-            '--convert-to', 'pdf', '--outdir', str(DOCX_CACHE), str(target),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         try:
             await asyncio.wait_for(proc.wait(), timeout=90)
         except asyncio.TimeoutError:
@@ -3401,6 +3402,82 @@ def profil_lo(nazwa: str) -> str:
     return '-env:UserInstallation=' + (KONF.katalog_danych / nazwa).resolve().as_uri()
 
 
+# ── LibreOffice bez sieci (C9) ──────────────────────────────────────────────
+# soffice konwertuje dokumenty z treści katalogu; pole INCLUDEPICTURE
+# http://… w DOCX kazałoby mu pobrać adres z sieci serwera (SSRF). Piaskownica
+# odcina sieć: bwrap --unshare-net, a gdy go brak — unshare -n (bez roota
+# zwykle zablokowane; usługa konsoli działa jako root). Wykrycie RAZ na start
+# (on_startup): próbne uruchomienie „true" w piaskownicy — RestrictNamespaces=yes
+# w systemd blokuje przestrzenie nazw, wtedy próba się nie udaje i soffice
+# rusza zwyczajnie (podgląd DOCX działa), a rejestr dostaje jedno ostrzeżenie.
+PIASKOWNICE = (
+    ('bwrap', ['bwrap', '--unshare-net', '--dev-bind', '/', '/']),
+    ('unshare', ['unshare', '-n']),
+)
+_PIASKOWNICA = None          # None = nie wykryto; [] = brak; lista = przedrostek
+
+
+def _proba_polecenia(cmd) -> bool:
+    import subprocess
+    try:
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _wykryj_piaskownice(which=None, proba=None) -> list:
+    """Pierwsza działająca piaskownica sieci (przedrostek polecenia) albo []."""
+    global _PIASKOWNICA
+    which = which or shutil.which
+    proba = proba or _proba_polecenia
+    _PIASKOWNICA = []
+    if KONF.soffice_bez_sieci == 'nie':
+        return _PIASKOWNICA
+    nieudane = []
+    for nazwa, przedrostek in PIASKOWNICE:
+        if not which(nazwa):
+            continue
+        if proba(przedrostek + ['true']):
+            _PIASKOWNICA = przedrostek
+            _evlog('soffice', f'konwersje LibreOffice bez sieci: {" ".join(przedrostek)}')
+            return _PIASKOWNICA
+        nieudane.append(nazwa)
+    powod = (f'{" i ".join(nieudane)} nie uruchamia się (przestrzenie nazw zablokowane, '
+             'np. RestrictNamespaces=yes albo brak uprawnień)' if nieudane
+             else 'brak bwrap i unshare')
+    skutek = ('podgląd DOCX i druk ODMAWIAJĄ konwersji (soffice_bez_sieci = tak)'
+              if KONF.soffice_bez_sieci == 'tak' else
+              'soffice konwertuje Z DOSTĘPEM do sieci — dokument z polem '
+              'INCLUDEPICTURE http://… może kazać serwerowi pobrać adres '
+              '(zainstaluj bubblewrap: apt install bubblewrap)')
+    _evlog('soffice', f'piaskownica sieci niedostępna: {powod}; {skutek}', level='warn')
+    return _PIASKOWNICA
+
+
+def polecenie_soffice(*args):
+    """Lista argumentów uruchomienia soffice (z piaskownicą, jeśli działa);
+    None = soffice_bez_sieci = tak, a piaskownicy brak (konwersja zabroniona)."""
+    baza = ['soffice', *args]
+    if KONF.soffice_bez_sieci == 'nie':
+        return baza
+    if _PIASKOWNICA is None:
+        _wykryj_piaskownice()
+    if _PIASKOWNICA:
+        return [*_PIASKOWNICA, *baza]
+    if KONF.soffice_bez_sieci == 'tak':
+        return None
+    return baza
+
+
+async def _soffice_start(app):
+    """on_startup: wykrycie piaskownicy raz na start (próby w wątku)."""
+    global _PIASKOWNICA
+    _PIASKOWNICA = None
+    if KONF.modul('podglad_docx') or KONF.modul('druk'):
+        await asyncio.get_running_loop().run_in_executor(None, _wykryj_piaskownice)
+
+
 def _docx_to_txt(p: Path) -> Path:
     """Awaryjne źródło dla lektora: tekst wprost z DOCX (python-docx)."""
     import docx
@@ -3464,9 +3541,14 @@ async def _drukuj(target: Path):
             zrodlo_pdf = target
         if zrodlo_pdf is not None:
             pdf = kat / (zrodlo_pdf.stem + '.pdf')
-            if await _polecenie('soffice', '--headless', profil_lo('lo-profil-druk'),
-                                '--convert-to', 'pdf', '--outdir', str(kat),
-                                str(zrodlo_pdf), log=log):
+            cmd = polecenie_soffice('--headless', profil_lo('lo-profil-druk'),
+                                    '--convert-to', 'pdf', '--outdir', str(kat),
+                                    str(zrodlo_pdf))
+            if cmd is None:
+                log.write('soffice_bez_sieci = tak, a piaskownicy sieci brak — '
+                          'konwersja do PDF zabroniona\n'.encode())
+                return
+            if await _polecenie(*cmd, log=log):
                 return
         await _polecenie('lp', '-d', 'Canon_G3070', str(pdf), log=log)
 
@@ -4331,6 +4413,7 @@ def utworz_aplikacje(k):
     app.on_startup.append(_lektor_restore)        # NAJPIERW wczytaj kolejkę
     app.on_startup.append(_cleanup_parts)         # potem sprzątaj porzucone
     app.on_startup.append(_pamiec_start)
+    app.on_startup.append(_soffice_start)          # piaskownica sieci soffice (C9)
     app.on_cleanup.append(_pamiec_stop)
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)

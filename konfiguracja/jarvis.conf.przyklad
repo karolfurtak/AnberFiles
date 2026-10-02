@@ -34,6 +34,12 @@ prog_pamieci_mb = 400            ; serwer + procesy potomne (soffice, lektor): o
 # localhost, nazwy *.local i nazwy z tej listy (po przecinku lub spacji); inne → 421.
 # Wpis z kropką na początku = sufiks, np. .ts.net (nazwy MagicDNS Tailscale).
 dozwolone_hosty =
+# LibreOffice (podgląd DOCX, druk) bez dostępu do sieci — dokument z polem INCLUDEPICTURE
+# http://… nie każe serwerowi pobierać adresów. auto = bwrap --unshare-net albo unshare -n,
+# gdy działają (inaczej zwykły soffice + ostrzeżenie w rejestrze zdarzeń przy starcie);
+# tak = wymagane (bez piaskownicy podgląd DOCX i druk odmawiają); nie = bez piaskownicy.
+# Uwaga: RestrictNamespaces=yes w jednostce systemd blokuje bwrap — patrz README.
+soffice_bez_sieci = auto
 
 [katalogi]
 katalog_glowny   = /srv/anberfiles/korzen
