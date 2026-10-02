@@ -1,0 +1,14 @@
+# Harmonogram odświeżania klonów: 2 min po starcie, potem co 15 min.
+# Kopia robocza: /etc/systemd/system/anberfiles-vault.timer, potem:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now anberfiles-vault.timer
+
+[Unit]
+Description=AnberFiles — odświeżanie klonów co 15 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

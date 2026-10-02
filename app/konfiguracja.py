@@ -9,7 +9,9 @@ w ścieżce nie może po cichu przełączyć instancji na ustawienia konsoli.
 Priorytet wartości [serwer]: zmienna środowiska > plik ustawień > domyślne.
   SERVER_HOST → host, SERVER_PORT → port, SERVER_USER → uzytkownik_www.
 Hasło WYŁĄCZNIE ze zmiennej SERVER_PASS (nigdy z pliku — plik może trafić
-do repozytorium, hasło nie).
+do repozytorium, hasło nie) — dotyczy logowania „basic" (HTTP Basic).
+Logowanie „formularz" (app/logowanie.py) trzyma skrót hasła i sekret ciasteczek
+w katalog_danych/auth/; SERVER_PASS nie jest wtedy potrzebne.
 
 Moduł działa na Pythonie 3.10 (Anbernic) i 3.13 (Jarvis); tylko biblioteka
 standardowa.
@@ -27,12 +29,14 @@ SCIEZKA_BATERII = Path('/sys/class/power_supply/axp2202-battery')
 # podpowiedź w komunikacie o braku hasła (instancja Jarvis, usługa systemd)
 PLIK_HASLA_PODPOWIEDZ = '/etc/anberfiles/haslo.env'
 
+LOGOWANIE = ('basic', 'formularz')
+
 MODULY = ('podglad_docx', 'eksport_docx', 'lektor', 'lektor_opisy_ai',
           'wylaczanie', 'druk', 'bateria', 'kadrowanie')
 
 KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
-               'haslo_wymagane', 'tylko_odczyt'),
+               'haslo_wymagane', 'tylko_odczyt', 'logowanie'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -71,6 +75,12 @@ class Konfiguracja:
     kosz: Path
     moduly: dict = field(default_factory=dict)
     zrodlo: str = 'domyślne (Anbernic)'
+    logowanie: str = 'basic'
+
+    @property
+    def katalog_auth(self) -> Path:
+        """Skrót hasła i sekret ciasteczek (logowanie „formularz")."""
+        return self.katalog_danych / 'auth'
 
     def modul(self, nazwa: str) -> bool:
         if nazwa not in MODULY:
@@ -165,6 +175,10 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
     glowny = sciezka_k('katalog_glowny', DOMYSLNY_KATALOG_GLOWNY)
     dane = sciezka_k('katalog_danych', DOMYSLNY_KATALOG_DANYCH)
     lektor = k.get('katalog_lektora', '')
+    logowanie = s.get('logowanie', 'basic').strip().lower()
+    if logowanie not in LOGOWANIE:
+        raise BladKonfiguracji(f'[serwer] logowanie = {logowanie!r}: dozwolone '
+                               f'{" albo ".join(LOGOWANIE)}')
     return Konfiguracja(
         nazwa_instancji=s.get('nazwa_instancji') or 'Anbernic',
         host=host,
@@ -187,6 +201,7 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         kosz=sciezka_k('kosz', glowny / '.kosz'),
         moduly={n: _bool('moduly', n, m.get(n, 'tak')) for n in MODULY},
         zrodlo=zrodlo,
+        logowanie=logowanie,
     )
 
 
@@ -204,7 +219,7 @@ def sprawdz_przy_starcie(k: Konfiguracja) -> list:
     """Warunki startu. Zwraca listę błędów (pusta = można startować).
     Próba zapisu do katalogu danych: zapis + odczyt + usunięcie pliku próbnego."""
     bledy = []
-    if k.haslo_wymagane and not k.haslo:
+    if k.logowanie == 'basic' and k.haslo_wymagane and not k.haslo:
         bledy.append(
             f'Brak hasła: ustaw SERVER_PASS w {PLIK_HASLA_PODPOWIEDZ} '
             f'(instancja {k.nazwa_instancji} ma haslo_wymagane = tak). '
@@ -242,6 +257,6 @@ def opis(k: Konfiguracja) -> str:
     """Jedna linia do dziennika startu."""
     wyl = [n for n in MODULY if not k.modul(n)]
     return (f'instancja={k.nazwa_instancji} ustawienia={k.zrodlo} '
-            f'katalog={k.katalog_glowny} '
+            f'katalog={k.katalog_glowny} logowanie={k.logowanie} '
             f'tylko_odczyt={"tak" if k.tylko_odczyt else "nie"} '
             f'moduły_wyłączone={",".join(wyl) or "brak"}')

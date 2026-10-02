@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Reset hasła AnberFiles (logowanie = formularz) — polecenie administracyjne.
+
+    sudo anberfiles-reset-hasla [--conf /etc/anberfiles/jarvis.conf]
+
+Co robi:
+  1. czyta katalog_danych z pliku ustawień instancji (app/konfiguracja.py),
+  2. usuwa skrót hasła  katalog_danych/auth/haslo.json,
+  3. zastępuje sekret   katalog_danych/auth/sekret nowym losowym
+     → ciasteczka WSZYSTKICH urządzeń przestają być ważne,
+  4. zachowuje właściciela plików (użytkownik usługi) i prawa 0600.
+Restart usługi NIE jest potrzebny: serwer sprawdza oba pliki przy każdym
+żądaniu. Następny krok: otworzyć AnberFiles przez Tailscale i ustawić nowe
+hasło na ekranie „Ustaw hasło".
+
+Instalacja (dowiązanie, żeby skrypt znalazł katalog app/ repozytorium):
+    sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /usr/local/bin/
+Kod wyjścia: 0 = sukces, 1 = błąd (komunikat na stderr).
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+
+def _katalog_app() -> Path:
+    wlasny = Path(__file__).resolve().parents[1] / 'app'
+    if (wlasny / 'konfiguracja.py').is_file():
+        return wlasny
+    return Path(os.environ.get('ANBERFILES_KOD', '/srv/anberfiles/kod')) / 'app'
+
+
+sys.path.insert(0, str(_katalog_app()))
+
+
+def sprawdz_uprawnienia(katalog: Path, euid=None):
+    """None = wolno; tekst = powód odmowy. Wolno administratorowi (root)
+    i właścicielowi katalogu (użytkownikowi usługi)."""
+    if os.name != 'posix':
+        return None
+    euid = os.geteuid() if euid is None else euid
+    if euid == 0:
+        return None
+    k = Path(katalog)
+    while not k.exists() and k != k.parent:
+        k = k.parent
+    if k.stat().st_uid == euid:
+        return None
+    return (f'brak uprawnień do {katalog} — uruchom jako administrator: '
+            'sudo anberfiles-reset-hasla')
+
+
+def _blad(tekst: str) -> int:
+    print(f'anberfiles-reset-hasla: BŁĄD — {tekst}', file=sys.stderr, flush=True)
+    return 1
+
+
+def glowna(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog='anberfiles-reset-hasla',
+        description='Usuwa hasło AnberFiles i unieważnia zapamiętane urządzenia.')
+    ap.add_argument('--conf', default=os.environ.get('ANBERFILES_CONF')
+                    or '/etc/anberfiles/jarvis.conf',
+                    help='plik ustawień instancji (domyślnie ANBERFILES_CONF '
+                         'albo /etc/anberfiles/jarvis.conf)')
+    a = ap.parse_args(argv)
+    try:
+        import konfiguracja
+        import logowanie
+    except ImportError as e:
+        return _blad(f'nie znaleziono modułów AnberFiles ({e}); ustaw ANBERFILES_KOD '
+                     'na katalog repozytorium albo zainstaluj skrypt dowiązaniem')
+    try:
+        k = konfiguracja.wczytaj(Path(a.conf), env={})
+    except konfiguracja.BladKonfiguracji as e:
+        return _blad(f'plik ustawień {a.conf}: {e}')
+    if k.logowanie != 'formularz':
+        return _blad(f'instancja {k.nazwa_instancji} ma logowanie = {k.logowanie}; '
+                     'reset dotyczy trybu „formularz" (hasło basic: SERVER_PASS)')
+    katalog = k.katalog_auth
+    odmowa = sprawdz_uprawnienia(katalog)
+    if odmowa:
+        return _blad(odmowa)
+    try:
+        if not katalog.is_dir():
+            logowanie.przygotuj_katalog(katalog)
+        st = katalog.stat()
+        wlasciciel = (st.st_uid, st.st_gid) if os.name == 'posix' else None
+        usuniety = logowanie.usun_haslo(katalog)
+        logowanie.zmien_sekret(katalog, wlasciciel=wlasciciel)
+        if os.name == 'posix':
+            os.chown(katalog, *wlasciciel)
+            os.chmod(katalog, 0o700)
+    except OSError as e:
+        return _blad(f'{katalog}: {e}')
+    print(f'Instancja {k.nazwa_instancji} (ustawienia {a.conf}):')
+    print(f'  skrót hasła {katalog / logowanie.PLIK_HASLA}: '
+          + ('usunięty' if usuniety else 'nie istniał'))
+    print(f'  sekret {katalog / logowanie.PLIK_SEKRETU}: zastąpiony nowym losowym '
+          '— wszystkie zapamiętane urządzenia wylogowane')
+    print('  restart usługi niepotrzebny (serwer czyta pliki przy każdym żądaniu)')
+    print('Co dalej: otwórz AnberFiles przez Tailscale (http://<adres-tailscale>:'
+          f'{k.port}/) i ustaw nowe hasło na ekranie „Ustaw hasło".')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(glowna())

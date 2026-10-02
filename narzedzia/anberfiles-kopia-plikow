@@ -1,0 +1,126 @@
+#!/bin/sh
+# Kopia plików instancji AnberFiles (Jarvis) — tego, czego NIE ma w GitHubie.
+#
+#   sudo anberfiles-kopia-plikow <katalog-docelowy>
+#
+# Kopiuje (lustro: rsync -a --delete; bez rsync — cp -a) do <katalog-docelowy>/pliki/
+# z zachowaniem ścieżek bezwzględnych:
+#   /etc/anberfiles/                      (BEZ haslo.env)
+#   /etc/systemd/system/anberfiles*.service|.timer i katalogi anberfiles*.d
+#   /etc/cups/printers.conf, /etc/cups/ppd/
+#   /srv/anberfiles/eksport/lektor-ustawienia.conf
+#   /srv/anberfiles/korzen/lektor/        (nagrania lektora)
+#   /usr/local/bin/anberfiles-odswiez
+#   /srv/anberfiles/.ssh/config           (BEZ kluczy prywatnych)
+# oraz <katalog-docelowy>/pakiety.txt (wersje pakietów systemowych, dpkg-query).
+# NIGDY: katalog_danych/auth/ (skrót hasła, sekret), haslo.env, klucze prywatne.
+# Na końcu znacznik <katalog-docelowy>/.ostatni z datą.
+#
+# ANBERFILES_KOPIA_ZRODLO — korzeń źródeł (domyślnie /; testy podają katalog testowy).
+# Brak pliku źródłowego = wpis „brak" w raporcie, nie błąd.
+# Kod wyjścia: 0 = sukces, 1 = błąd (komunikat na stderr).
+set -u
+
+ZR="${ANBERFILES_KOPIA_ZRODLO:-/}"
+ZR="${ZR%/}"
+PAKIETY="mpg123 flac cups cups-client cups-filters avahi-utils libreoffice-writer-nogui fonts-liberation2 fonts-dejavu-core"
+
+blad() { printf 'anberfiles-kopia-plikow: BŁĄD — %s\n' "$*" >&2; exit 1; }
+
+[ $# -eq 1 ] || blad "podaj jeden argument: katalog docelowy kopii"
+CEL="$1"
+if [ -e "$CEL" ] && [ ! -d "$CEL" ]; then blad "$CEL istnieje i nie jest katalogiem"; fi
+mkdir -p "$CEL" || blad "nie da się utworzyć $CEL"
+CEL="$(cd "$CEL" && pwd)" || blad "nie da się wejść do $CEL"
+ROB="$CEL/.w-toku"
+rm -rf "$ROB" || blad "nie da się wyczyścić $ROB"
+mkdir -p "$ROB" || blad "nie da się utworzyć $ROB"
+
+MA_RSYNC=0
+command -v rsync >/dev/null 2>&1 && MA_RSYNC=1
+
+# kopiuj <ścieżka bezwzględna> — plik albo katalog do $ROB/<ścieżka>
+kopiuj() {
+    zrodlo="$ZR$1"
+    if [ ! -e "$zrodlo" ]; then
+        printf '  brak     %s\n' "$1"
+        return 0
+    fi
+    cel="$ROB$1"
+    mkdir -p "$(dirname "$cel")" || blad "mkdir $(dirname "$cel")"
+    if [ -d "$zrodlo" ]; then
+        if [ "$MA_RSYNC" = 1 ]; then
+            rsync -a --exclude 'haslo.env' "$zrodlo/" "$cel/" || blad "rsync $1"
+        else
+            cp -a "$zrodlo" "$cel" || blad "cp $1"
+        fi
+    else
+        cp -a "$zrodlo" "$cel" || blad "cp $1"
+    fi
+    printf '  skopiowano %s\n' "$1"
+}
+
+echo "Kopia plików instancji AnberFiles → $CEL (źródło: ${ZR:-/})"
+
+# /etc/anberfiles bez haslo.env — plik po pliku (także ścieżka cp)
+if [ -d "$ZR/etc/anberfiles" ]; then
+    for f in "$ZR/etc/anberfiles"/* "$ZR/etc/anberfiles"/.[!.]*; do
+        [ -e "$f" ] || continue
+        n="$(basename "$f")"
+        [ "$n" = haslo.env ] && { printf '  pominięto /etc/anberfiles/haslo.env (hasło)\n'; continue; }
+        kopiuj "/etc/anberfiles/$n"
+    done
+else
+    printf '  brak     /etc/anberfiles\n'
+fi
+
+for f in "$ZR/etc/systemd/system"/anberfiles*.service "$ZR/etc/systemd/system"/anberfiles*.timer \
+         "$ZR/etc/systemd/system"/anberfiles*.d; do
+    [ -e "$f" ] || continue
+    kopiuj "/etc/systemd/system/$(basename "$f")"
+done
+
+kopiuj /etc/cups/printers.conf
+kopiuj /etc/cups/ppd
+kopiuj /srv/anberfiles/eksport/lektor-ustawienia.conf
+kopiuj /srv/anberfiles/korzen/lektor
+kopiuj /usr/local/bin/anberfiles-odswiez
+kopiuj /srv/anberfiles/.ssh/config
+
+# Bezpiecznik: w kopii nie może być hasła, sekretu ani klucza prywatnego
+ZLE="$(find "$ROB" \( -name haslo.env -o -name haslo.json -o -name sekret \
+        -o -path '*/auth/*' -o -name 'id_*' ! -name '*.pub' \) -print 2>/dev/null)"
+if [ -n "$ZLE" ]; then
+    rm -rf "$ROB"
+    blad "w kopii znalazły się pliki tajne — przerwano: $ZLE"
+fi
+if grep -rl 'PRIVATE KEY' "$ROB" >/dev/null 2>&1; then
+    rm -rf "$ROB"
+    blad "w kopii znalazł się klucz prywatny — przerwano"
+fi
+
+# Lista pakietów (wersje do odtworzenia)
+{
+    echo "# Pakiety systemowe AnberFiles — stan z $(date '+%Y-%m-%d %H:%M:%S')"
+    if command -v dpkg-query >/dev/null 2>&1; then
+        for p in $PAKIETY; do
+            w="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"
+            printf '%s %s\n' "$p" "${w:-BRAK}"
+        done
+    else
+        echo "# dpkg-query niedostępne — lista pakietów: $PAKIETY"
+    fi
+} > "$ROB.pakiety" || blad "zapis listy pakietów"
+
+# Podmiana: lustro poprzedniej kopii
+if [ "$MA_RSYNC" = 1 ]; then
+    mkdir -p "$CEL/pliki" || blad "mkdir $CEL/pliki"
+    rsync -a --delete "$ROB/" "$CEL/pliki/" || blad "rsync --delete do $CEL/pliki"
+    rm -rf "$ROB"
+else
+    rm -rf "$CEL/pliki" || blad "usunięcie starej kopii $CEL/pliki"
+    mv "$ROB" "$CEL/pliki" || blad "przeniesienie $ROB → $CEL/pliki"
+fi
+mv "$ROB.pakiety" "$CEL/pakiety.txt" || blad "zapis $CEL/pakiety.txt"
+date '+%Y-%m-%d %H:%M:%S %z' > "$CEL/.ostatni" || blad "zapis znacznika .ostatni"
+echo "SUKCES: kopia w $CEL/pliki, pakiety w $CEL/pakiety.txt, znacznik $CEL/.ostatni"

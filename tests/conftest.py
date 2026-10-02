@@ -86,12 +86,28 @@ def wczytaj(conf: Path, haslo: str = HASLO):
 
 
 def uruchom(k, scenariusz):
-    """Serwer z ustawieniami k w pętli testowej; scenariusz(klient) → wynik."""
+    """Serwer z ustawieniami k w pętli testowej; scenariusz(klient) → wynik.
+
+    Nagłówki X-Test-Remote i X-Test-Scheme w żądaniu testowym podstawiają
+    request.remote (adres klienta) i schemat (http/https) — pośrednik
+    dokładany WYŁĄCZNIE tutaj, w testach; serwer nagłówków X-* nie czyta."""
+    from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
     import server
 
+    @web.middleware
+    async def podstaw_adres(request, handler):
+        adres = request.headers.get('X-Test-Remote')
+        if adres:
+            request = request.clone(remote=adres)
+        schemat = request.headers.get('X-Test-Scheme')
+        if schemat:
+            request = request.clone(scheme=schemat)
+        return await handler(request)
+
     async def _run():
         app = server.utworz_aplikacje(k)
+        app.middlewares.insert(0, podstaw_adres)
         async with TestClient(TestServer(app)) as cl:
             return await scenariusz(cl)
     return asyncio.run(_run())

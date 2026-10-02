@@ -11,7 +11,15 @@ import pytest
 from yarl import URL
 
 from conftest import (ATRAPA_TTS_BLAD, HASLO, czekaj_na_lektora, uruchom,
-                      wczytaj, zbuduj_anbernic, zbuduj_jarvis)
+                      wczytaj, zbuduj_anbernic)
+from conftest import zbuduj_jarvis as _zbuduj_jarvis
+
+
+def zbuduj_jarvis(tmp_path, **nadpisz):
+    """Instancja Jarvis z logowaniem HTTP Basic: te testy sprawdzają tylko
+    odczyt, lektor i moduły, nie sposób logowania (ten: test_logowanie.py)."""
+    nadpisz.setdefault('logowanie', 'basic')
+    return _zbuduj_jarvis(tmp_path, **nadpisz)
 
 
 def _drzewo(tmp_path):

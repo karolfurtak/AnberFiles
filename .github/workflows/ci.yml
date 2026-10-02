@@ -10,8 +10,10 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install ruff aiohttp
-      - run: ruff check --select E9,F app/ tools/ tests/
-      - run: python -m py_compile app/server.py app/konfiguracja.py tools/czytaj_tts.py
+      - run: ruff check --select E9,F app/ tools/ tests/ narzedzia/anberfiles-reset-hasla
+      - run: python -m py_compile app/server.py app/konfiguracja.py app/logowanie.py tools/czytaj_tts.py narzedzia/anberfiles-reset-hasla
+      - name: Składnia skryptów sh
+        run: for f in narzedzia/anberfiles-kopia-plikow narzedzia/anberfiles-odswiez; do sh -n "$f"; done
 
   testy:
     name: testy (${{ matrix.instancja }}, Python ${{ matrix.python }})
@@ -40,22 +42,31 @@ jobs:
           echo "SERVER_PASS=ci-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
       - name: Testy
         run: python -m pytest tests -v
-      - name: Start serwera na ustawieniach instancji (401 bez hasła, 200 z hasłem)
+      - name: Start serwera na ustawieniach instancji (formularz — ustaw hasło, ciasteczko, 401 bez niego)
         if: matrix.instancja == 'jarvis'
         run: |
-          python app/server.py > "$RUNNER_TEMP/serwer.log" 2>&1 &
+          SERVER_PASS= python app/server.py > "$RUNNER_TEMP/serwer.log" 2>&1 &
           PID=$!
-          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8790/ && break; sleep 0.5; done
-          BEZ=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/)
-          Z=$(curl -s -o /dev/null -w '%{http_code}' -u "karol:$SERVER_PASS" http://127.0.0.1:8790/)
+          U=http://127.0.0.1:8790
+          for i in $(seq 1 30); do curl -s -o /dev/null $U/ && break; sleep 0.5; done
+          EKRAN=$(curl -s -H 'Accept: text/html' $U/)
+          echo "$EKRAN" | grep -q 'name="powtorz"' || { echo "BŁĄD: brak ekranu Ustaw hasło"; kill $PID; exit 1; }
+          H="ci-haslo-$GITHUB_RUN_ID"
+          UST=$(curl -s -o /dev/null -w '%{http_code}' -c "$RUNNER_TEMP/c.txt"                 --data-urlencode "haslo=$H" --data-urlencode "powtorz=$H" $U/__anberfiles/ustaw-haslo)
+          Z=$(curl -s -o /dev/null -w '%{http_code}' -b "$RUNNER_TEMP/c.txt" $U/)
+          BEZ=$(curl -s -o /dev/null -w '%{http_code}' $U/)
+          ZLE=$(curl -s -o /dev/null -w '%{http_code}' --data-urlencode "haslo=zle-haslo-000" $U/__anberfiles/zaloguj)
           kill $PID; cat "$RUNNER_TEMP/serwer.log"
-          echo "bez hasła: $BEZ, z hasłem: $Z"
-          test "$BEZ" = 401 && test "$Z" = 200
-      - name: Odmowa startu bez hasła
+          echo "ustawienie: $UST, z ciasteczkiem: $Z, bez: $BEZ, złe hasło: $ZLE"
+          ls -l "$RUNNER_TEMP/anberfiles/dane/auth"
+          test "$UST" = 303 && test "$Z" = 200 && test "$BEZ" = 401 && test "$ZLE" = 401
+          ! grep -rq "$H" "$RUNNER_TEMP/anberfiles/dane"
+      - name: Odmowa startu bez hasła (logowanie basic)
         if: matrix.instancja == 'jarvis'
         run: |
+          sed 's/^logowanie *=.*/logowanie = basic/' "$ANBERFILES_CONF" > "$RUNNER_TEMP/jarvis-basic.conf"
           set +e
-          SERVER_PASS= timeout 20 python app/server.py 2> "$RUNNER_TEMP/err.log"
+          ANBERFILES_CONF="$RUNNER_TEMP/jarvis-basic.conf" SERVER_PASS= timeout 20 python app/server.py 2> "$RUNNER_TEMP/err.log"
           RC=$?
           set -e
           cat "$RUNNER_TEMP/err.log"

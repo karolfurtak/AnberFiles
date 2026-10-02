@@ -102,7 +102,7 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   dane w `/mnt/data`, port 8765, wszystkie moduły włączone) — zachowanie jak dotąd.
 - Zmienna ustawiona, a pliku brak, nieznany klucz albo zła wartość = serwer nie startuje.
 - Sekcje: `[serwer]` (`nazwa_instancji`, `host`, `port`, `uzytkownik_www`,
-  `haslo_wymagane`, `tylko_odczyt`), `[katalogi]` (`katalog_glowny`, `katalog_danych`,
+  `haslo_wymagane`, `tylko_odczyt`, `logowanie`), `[katalogi]` (`katalog_glowny`, `katalog_danych`,
   `katalog_lektora`, `katalog_eksportu`, pliki rejestru i błędów, pamięć podręczna
   podglądu DOCX, katalog ZIP, favikona, kosz), `[moduly]` (`podglad_docx`,
   `eksport_docx`, `lektor`, `lektor_opisy_ai`, `wylaczanie`, `druk`, `bateria`,
@@ -117,6 +117,21 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   `katalog_lektora/<ścieżka katalogu źródła>/<nazwa>_lektor.<fmt>` zamiast obok
   dokumentu; podgląd `.md`, `?read` i ikona 🎧 w listingu je odnajdują.
 
+### Logowanie (`[serwer] logowanie`)
+
+- `basic` (domyślne, konsola Anbernic) — okno HTTP Basic, hasło z `SERVER_PASS`.
+- `formularz` (Jarvis) — strona logowania; poprawne hasło zapamiętuje urządzenie
+  trwałym ciasteczkiem (HMAC-SHA256, 10 lat, `HttpOnly`, `SameSite=Strict`), link
+  „wyloguj" w listingu. Pierwsze uruchomienie: ekran **„Ustaw hasło"** (min. 10 znaków),
+  dostępny tylko z sieci lokalnej i Tailscale. Skrót hasła (scrypt) i sekret ciasteczek:
+  `katalog_danych/auth/` (0600). `SERVER_PASS` niepotrzebny. Złe hasło: 1 s opóźnienia,
+  limit 10 prób na minutę na adres. Resetu przez WWW nie ma:
+  `sudo anberfiles-reset-hasla` (bez restartu usługi; wszystkie urządzenia wylogowane).
+
+Instancja Jarvis: jednostki systemd `konfiguracja/*.service.przyklad`, `*.timer.przyklad`,
+narzędzia w `narzedzia/` (reset hasła, kopia plików instancji, odświeżanie klonów),
+procedura odtworzenia: [`docs/odtworzenie-po-awarii.md`](docs/odtworzenie-po-awarii.md).
+
 Przykłady: [`konfiguracja/jarvis.conf.przyklad`](konfiguracja/jarvis.conf.przyklad),
 [`konfiguracja/lektor-ustawienia.conf.przyklad`](konfiguracja/lektor-ustawienia.conf.przyklad).
 
@@ -125,6 +140,7 @@ Przykłady: [`konfiguracja/jarvis.conf.przyklad`](konfiguracja/jarvis.conf.przyk
 ```bash
 scp app/server.py root@KONSOLA:/usr/local/bin/sprawozdania-server.py
 scp app/konfiguracja.py root@KONSOLA:/usr/local/bin/konfiguracja.py   # obok serwera
+# app/logowanie.py — tylko dla logowanie = formularz (konsola go nie potrzebuje)
 
 cat > /etc/sprawozdania-server.env <<EOF
 SERVER_PASS=twoje_haslo

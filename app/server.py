@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""AnberFiles — serwer plików HTTP (aiohttp), HTTP Basic Auth.
+"""AnberFiles — serwer plików HTTP (aiohttp), HTTP Basic Auth albo logowanie
+formularzem z zapamiętaniem urządzenia (app/logowanie.py, [serwer] logowanie).
 
 Ścieżki, port i przełączniki modułów: app/konfiguracja.py (plik ustawień
 instancji wskazany zmienną ANBERFILES_CONF; brak zmiennej = ustawienia konsoli
@@ -58,6 +59,8 @@ KONF = None
 ROOT = PORT = HOST = USER = PASSW = None
 EVENT_LOG = DOCX_CACHE = EXPORT_DIR = FAVICON_ICO_PATH = None
 CZYTAJ_TTS = LEKTOR_CONF = LEKTOR_QFILE = None
+# logowanie formularzem: moduł app/logowanie.py i limit prób (utworz_aplikacje)
+_LOGOWANIE = _BRAMKA = None
 
 
 def zastosuj_konfiguracje(k):
@@ -1823,6 +1826,9 @@ SORT_JS = (
 
 @web.middleware
 async def auth(request, handler):
+    if KONF.logowanie == 'formularz':
+        return await _LOGOWANIE.obsluz(request, handler, KONF.katalog_auth, _BRAMKA,
+                                       KONF.nazwa_instancji)
     # Pusty SERVER_PASS = brak autoryzacji (open access — tylko dla prywatnych sieci!)
     if not PASSW:
         return await handler(request)
@@ -2321,9 +2327,11 @@ async def serve(request):
             + (f' · <span class="muted">🔒 tylko odczyt ({_html.escape(KONF.nazwa_instancji)})</span>'
                if not zapis else '')
             +
-            f' · <a href="?zip=1" title="Pobierz CAŁY ten folder jako .zip">🗜 ZIP folderu</a>'
-            f' · <a href="#" id="cpcol" title="Skopiuj nazwy wszystkich plików (po jednej w wierszu)">⧉ kopiuj nazwy plików</a>'
-            f'{_battery_html()}</p>',
+            ' · <a href="?zip=1" title="Pobierz CAŁY ten folder jako .zip">🗜 ZIP folderu</a>'
+            ' · <a href="#" id="cpcol" title="Skopiuj nazwy wszystkich plików (po jednej w wierszu)">⧉ kopiuj nazwy plików</a>'
+            + (f' · <a href="{_LOGOWANIE.SCIEZKA_WYLOGOWANIA}" title="Usuń zapamiętanie tego '
+               'urządzenia">⎋ wyloguj</a>' if KONF.logowanie == 'formularz' else '')
+            + f'{_battery_html()}</p>',
             '<table><thead><tr>'
             '<th>Nazwa</th><th>Rozmiar</th><th>Modyfikacja</th><th>Utworzono</th>'
             '</tr></thead><tbody>',
@@ -3644,8 +3652,13 @@ async def _cleanup_parts(app):
 
 def utworz_aplikacje(k):
     """Aplikacja aiohttp dla ustawień instancji k (main() i testy)."""
-    global _LEKTOR_LOCK, _LEKTOR_PAUSED, _LEKTOR_SHUTDOWN
+    global _LEKTOR_LOCK, _LEKTOR_PAUSED, _LEKTOR_SHUTDOWN, _LOGOWANIE, _BRAMKA
     zastosuj_konfiguracje(k)
+    if k.logowanie == 'formularz':
+        # import tylko tu: konsola (basic) nie potrzebuje pliku logowanie.py
+        import logowanie as _LOGOWANIE
+        _LOGOWANIE.zapewnij_sekret(k.katalog_auth)   # 32 bajty, 0600, przy 1. starcie
+        _BRAMKA = _LOGOWANIE.Bramka(rejestr=_evlog)
     # stan kolejki lektora od zera (pętla zdarzeń nowa przy każdym starcie)
     _LEKTOR_QUEUE.clear()
     _LEKTOR_BLEDY.clear()
@@ -3676,9 +3689,18 @@ def main():
         for b in bledy:
             print(f'AnberFiles: ODMOWA STARTU — {b}', file=sys.stderr, flush=True)
         sys.exit(2)
-    app = utworz_aplikacje(k)
+    try:
+        app = utworz_aplikacje(k)
+    except OSError as e:
+        print(f'AnberFiles: ODMOWA STARTU — katalog logowania {k.katalog_auth}: {e}',
+              file=sys.stderr, flush=True)
+        sys.exit(2)
     _evlog('start', f'serwer wystartował na :{PORT} ({_konf.opis(k)})')
-    auth_info = f'user={USER}' if PASSW else 'OPEN (no auth)'
+    if k.logowanie == 'formularz':
+        auth_info = ('logowanie formularzem' if _LOGOWANIE.haslo_ustawione(k.katalog_auth)
+                     else 'logowanie formularzem — hasło NIEUSTAWIONE (ekran „Ustaw hasło")')
+    else:
+        auth_info = f'user={USER}' if PASSW else 'OPEN (no auth)'
     print(f'AnberFiles [{k.nazwa_instancji}]: http://{HOST}:{PORT}/ — {auth_info}'
           f' — {_konf.opis(k)}', flush=True)
     web.run_app(app, host=HOST, port=PORT, access_log=None)

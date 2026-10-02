@@ -21,6 +21,7 @@ def test_bez_pliku_ustawien_wartosci_anbernica():
     assert k.haslo_wymagane is False
     assert k.tylko_odczyt is False
     assert k.katalog_lektora is None
+    assert k.logowanie == 'basic'
     assert all(k.modul(n) for n in konfiguracja.MODULY)
     # dzisiejsze ścieżki konsoli, jedna po drugiej
     assert k.rejestr_zdarzen == Path('/mnt/data/anberfiles-events.log')
@@ -52,6 +53,7 @@ def test_instancja_jarvis_z_przykladu(tmp_path):
     assert k.uzytkownik_www == 'karol'
     assert k.haslo_wymagane is True
     assert k.tylko_odczyt is True
+    assert k.logowanie == 'formularz'
     assert k.katalog_glowny == tmp_path / 'srv' / 'korzen'
     assert k.katalog_lektora == tmp_path / 'srv' / 'korzen' / 'lektor'
     assert k.katalog_eksportu == tmp_path / 'srv' / 'eksport'
@@ -107,7 +109,7 @@ def _start_serwera(conf: Path, haslo: str):
 
 
 def test_haslo_wymagane_puste_odmowa_startu(tmp_path):
-    conf = zbuduj_jarvis(tmp_path)
+    conf = zbuduj_jarvis(tmp_path, logowanie='basic')
     r = _start_serwera(conf, '')
     assert r.returncode != 0
     assert 'Brak hasła' in r.stderr

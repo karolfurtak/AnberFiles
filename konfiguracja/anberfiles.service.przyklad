@@ -1,0 +1,35 @@
+# Jednostka systemd AnberFiles — przykład dla Jarvisa (Raspberry Pi 5).
+# Kopia robocza: /etc/systemd/system/anberfiles.service, potem:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now anberfiles
+# Dostęp tylko przez Tailscale (zapora systemu odcina sieć lokalną).
+# Logowanie formularzem: haslo.env niepotrzebny (myślnik = plik opcjonalny);
+# skrót hasła i sekret leżą w /srv/anberfiles/dane/auth/ (prawa 0600).
+
+[Unit]
+Description=AnberFiles — serwer plików (instancja Jarvis)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=anberfiles
+Group=anberfiles
+Environment=ANBERFILES_CONF=/etc/anberfiles/jarvis.conf
+Environment=PYTHONUNBUFFERED=1
+# soffice (podgląd DOCX, druk) potrzebuje zapisywalnego katalogu domowego
+Environment=HOME=/srv/anberfiles/dane
+EnvironmentFile=-/etc/anberfiles/haslo.env
+ExecStart=/srv/anberfiles/venv/bin/python /srv/anberfiles/kod/app/server.py
+Restart=on-failure
+RestartSec=5
+MemoryMax=768M
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+ReadWritePaths=/srv/anberfiles/dane /srv/anberfiles/korzen/lektor
+BindReadOnlyPaths=/srv/anberfiles/vault:/srv/anberfiles/korzen/vault /srv/anberfiles/wykonawca:/srv/anberfiles/korzen/wykonawca
+
+[Install]
+WantedBy=multi-user.target

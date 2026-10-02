@@ -1,0 +1,15 @@
+# Odświeżenie klonów vaulta i Wykonawcy (git pull --ff-only) — wywołuje
+# anberfiles-vault.timer. Kopia robocza: /etc/systemd/system/anberfiles-vault.service
+
+[Unit]
+Description=AnberFiles — odświeżenie klonów vault i wykonawca
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+User=anberfiles
+Group=anberfiles
+ExecStart=/usr/local/bin/anberfiles-odswiez
+TimeoutStartSec=300
+Nice=10
