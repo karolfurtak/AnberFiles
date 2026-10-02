@@ -622,3 +622,69 @@ def test_data_zgodna_z_nazwa_jedna_data(tmp_path):
     for plik in (dzis, bez):
         opis = server.opis_daty_notatki(plik)
         assert opis.startswith(f'powstanie {date.today():%d.%m.%Y}') and 'w nazwie' not in opis
+
+
+# ── pliki pomocnicze Wykonawcy i pierwszeństwo stanu wdrożenia (Karol 02.10
+# 19:20, „Zaakceptowane, niewdrożone”: „Czy to nie dubel?”) ─────────────────
+
+def _dubel(v):
+    d = v / 'Zasoby' / 'Wykonawca-i-Puls'
+    d.mkdir(parents=True)
+    for n in ('2026-09-28-plan-blokada', '2026-09-28-plan-blokada-wykonawca-plan',
+              '2026-09-28-plan-blokada-wykonawca-przeglad', 'inny-wykonawca-plan',
+              'inny-wykonawca-przeglad'):
+        (d / f'{n}.md').write_text(f'# {n}\n', encoding='utf-8')
+    w = 'Zasoby/Wykonawca-i-Puls/'
+    (v / 'Zasoby' / 'klasyfikacja.md').write_text(
+        '| Ścieżka | Rodzaj | Status | Stan wdrożenia | Do wdrożenia | Pilność i dowód |\n'
+        '|---|---|---|---|---|---|\n'
+        f'| `{w}2026-09-28-plan-blokada.md` | plan | do-akceptacji | WDROŻONE | Blokada | zlecenie 67, `98ce603` |\n'
+        f'| `{w}2026-09-28-plan-blokada-wykonawca-plan.md` | plan | do-akceptacji | WDROŻONE | — | 67 |\n'
+        f'| `{w}2026-09-28-plan-blokada-wykonawca-przeglad.md` | przegląd | do-akceptacji | NIE DOTYCZY | — | — |\n'
+        f'| `{w}inny-wykonawca-plan.md` | plan | do-akceptacji | NIEZLECONE | X | — |\n'
+        f'| `{w}inny-wykonawca-przeglad.md` | przegląd | do-akceptacji | NIE DOTYCZY | — | — |\n',
+        encoding='utf-8')
+
+
+def test_pliki_pomocnicze_wykonawcy_sa_zalacznikami_pozycji_glownej(tmp_path, auth):
+    k, v = _konf(tmp_path)
+    _dubel(v)
+
+    async def sc(cl):
+        return (await _lista(cl, auth, 'wdrozenia'), await _lista(cl, auth, 'informacyjne'),
+                await _lista(cl, auth, 'decyzja'), await _licznik(cl, auth))
+    wdr, inf, dec, lic = uruchom(k, sc)
+    # jedna pozycja główna z dwoma załącznikami, a nie trzy pozycje
+    assert wdr.count('<div class="row">') == 1
+    assert '<div class="tt">2026-09-28-plan-blokada</div>' in wdr
+    assert '📎 pliki pomocnicze (2)' in wdr
+    assert 'plan-blokada-wykonawca-plan.md?sluchaj=1' in wdr
+    assert 'plan-blokada-wykonawca-przeglad.md?sluchaj=1' in wdr
+    assert 'plan-blokada-wykonawca-przeglad' not in inf      # przegląd nie jest osobno
+    # brak pliku głównego → pozycją jest plan wykonawczy, przegląd jego załącznikiem
+    assert '<div class="tt">inny-wykonawca-plan</div>' in dec
+    assert '📎 pliki pomocnicze (1)' in dec and 'inny-wykonawca-przeglad.md?sluchaj=1' in dec
+    assert 'inny-wykonawca-przeglad</div>' not in inf
+    assert lic['do_decyzji'] == dec.count('<div class="row">')
+
+
+def test_akceptacja_pozycji_wdrozonej_zostaje_w_zleconych_i_wdrozonych(tmp_path, auth):
+    k, v = _konf(tmp_path)
+    _dubel(v)
+
+    async def sc(cl):
+        r1 = await _decyzja(cl, auth, 'Wykonawca-i-Puls/2026-09-28-plan-blokada-wykonawca-przeglad.md',
+                            'akceptuje')
+        r = await _decyzja(cl, auth, 'Wykonawca-i-Puls/2026-09-28-plan-blokada.md', 'akceptuje')
+        wdr = await _lista(cl, auth, 'wdrozenia')
+        zaak = await _lista(cl, auth, 'zaakceptowane')
+        eks = await (await cl.get('/?przesluchania=eksport', auth=auth)).json()
+        return r1.status, r.status, wdr, zaak, eks
+    s1, st, wdr, zaak, eks = uruchom(k, sc)
+    assert s1 == 200 and st == 200
+    assert '2026-09-28-plan-blokada.md?sluchaj=1' in wdr
+    assert '2026-09-28-plan-blokada.md?sluchaj=1' not in zaak
+    # obie decyzje zapisane (także ta przy załączniku) — nic nie skasowane
+    zapisane = {d['sciezka'] for d in eks['decyzje']}
+    assert {'Zasoby/Wykonawca-i-Puls/2026-09-28-plan-blokada.md',
+            'Zasoby/Wykonawca-i-Puls/2026-09-28-plan-blokada-wykonawca-przeglad.md'} <= zapisane

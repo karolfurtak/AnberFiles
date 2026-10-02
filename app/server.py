@@ -4737,6 +4737,16 @@ def _prz_stan_nagrania(w: dict, prog) -> dict:
     return {'rodzaj': 'brak', 'napis': '○ brak nagrania'}
 
 
+def _prz_zalaczniki_html(w: dict) -> str:
+    zal = w.get('zalaczniki') or []
+    if not zal:
+        return ''
+    linki = ''.join(f'<a href="/{quote(_rel_root(p))}?sluchaj=1">📄 {_esc(p.stem)}</a>'
+                    for p in zal)
+    return (f'<details class="zal"><summary>📎 pliki pomocnicze ({len(zal)})</summary>'
+            f'{linki}</details>')
+
+
 def _prz_licznik(wiersze: list) -> dict:
     lic = {z: 0 for z in _prz.ZAKLADKI}
     for w in wiersze:
@@ -4768,7 +4778,8 @@ async def przesluchania_get(request):
     if co == 'eksport':
         return web.json_response(_prz.eksport_json(_PRZ_MAGAZYN),
                                  headers={'Cache-Control': 'no-store'})
-    wiersze = _prz_wiersze(await _prz_notatki(odswiez='odswiez' in request.query))
+    wiersze = _prz.grupuj_pomocnicze(
+        _prz_wiersze(await _prz_notatki(odswiez='odswiez' in request.query)))
     if co == 'licznik':
         lic = _prz_licznik(wiersze)
         return _cors_strony_startowej(request, web.json_response(
@@ -4910,6 +4921,10 @@ PRZ_STYLE = (
     '.sw.nie-dotyczy{background:#2b3240;color:#9aa0ab}.sw.nieznany{background:#3a2f4a;color:#d7c4ff}'
     '.dw{color:#b8bec8;font-size:.82em;margin-top:.35em;line-height:1.4}'
     '.sub{color:#9aa0ab;font-size:.82em;margin-top:.15em;line-height:1.35}'
+    '.zal{margin-top:.45em;font-size:.85em}.zal summary{cursor:pointer;color:#9aa0ab;'
+    'min-height:32px;display:flex;align-items:center}'
+    '.zal a{display:block;color:#7ab7ff;text-decoration:none;padding:.35em .2em;'
+    'word-break:break-all}'
     '.nazwa{padding:.35em .9em;font-size:.85em;color:#cfd6df;background:#181b21}'
     '.nazwa b{color:#fff;word-break:break-all}'
     '.dw.dd{color:#8a93a0;font-size:.76em}'
@@ -5012,7 +5027,7 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
             f'<div class="tt">{_esc(Path(w["plik"]).stem)}</div>'
             f'<div class="sub">{_esc(w["tytul"])} · {_esc(Path(w["sciezka"]).parent.as_posix())}'
             f'</div><div class="mt">{"".join(f"<span>{z}</span>" for z in znaczniki)}'
-            f'</div>{opis}</a>{lek}</div>')
+            f'</div>{opis}</a>{lek}' + _prz_zalaczniki_html(w) + '</div>')
     tresc = ''.join(czesci) or (
         f'<div class="pusto">Brak notatek w zakładce „{_esc(_prz.NAZWY_ZAKLADEK[zakladka])}”.'
         '</div>')

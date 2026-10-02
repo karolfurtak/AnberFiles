@@ -297,10 +297,73 @@ def zakladka_statusu(status: str) -> str:
 
 def zakladka_pozycji(status: str, stan) -> str:
     """Pozycja nierozstrzygnięta (do-akceptacji) ze stanem wdrożenia → zakładka
-    wg stanu; decyzje Karola i statusy z nagłówka → zakładka wg statusu."""
+    wg stanu; decyzje Karola i statusy z nagłówka → zakładka wg statusu.
+    Wyjątek (Karol 02.10 19:20): „akceptuję” przy pozycji ZLECONE/WDROŻONE
+    zostaje w „Zlecone i wdrożone” — stan wdrożenia ma pierwszeństwo, bo
+    „Zaakceptowane, niewdrożone” byłoby nieprawdą. Decyzja zostaje zapisana.
+    „Do poprawy” i „odrzucam” zawsze idą do „Rozstrzygnięte”."""
+    if stan in ('zlecone', 'wdrozone') and status in ('do-akceptacji',
+                                                       'zaakceptowane-niewdrozone'):
+        return 'wdrozenia'
     if status == 'do-akceptacji' and stan in ZAKLADKA_STANU:
         return ZAKLADKA_STANU[stan]
     return zakladka_statusu(status)
+
+
+# Pliki pomocnicze Wykonawcy (plan wykonawczy, przegląd planu) dla tej samej
+# nazwy bazowej nie są osobnymi pozycjami listy (Karol 02.10: „Czy to nie
+# dubel?”). Kolejność ma znaczenie: dłuższe końcówki najpierw.
+SUFIKSY_POMOCNICZE = ('-wykonawca-przeglad', '-wykonawca-plan', '-plan-wykonawczy',
+                      '-przeglad')
+SUFIKSY_PLANU = ('-wykonawca-plan', '-plan-wykonawczy')
+
+
+def baza_pomocniczego(stem: str):
+    """Nazwa bazowa pliku pomocniczego albo None (plik zwykły)."""
+    for suf in SUFIKSY_POMOCNICZE:
+        if stem.endswith(suf) and len(stem) > len(suf):
+            return stem[:-len(suf)]
+    return None
+
+
+def grupuj_pomocnicze(wiersze: list) -> list:
+    """Pozycje listy bez plików pomocniczych; każda pozycja dostaje
+    'zalaczniki' = istniejące na dysku pliki pomocnicze swojej nazwy bazowej.
+    Plik pomocniczy znika z listy, gdy na liście jest pozycja główna (nazwa
+    bazowa); bez niej pozycją zostaje plan wykonawczy, a przegląd jest jego
+    załącznikiem. Wiersze nie są zmieniane w miejscu (kopie słowników)."""
+    def klucz(w):
+        p = Path(w['sciezka'])
+        return p.parent.as_posix(), p.stem
+    po_kluczu = {klucz(w): w for w in wiersze}
+    ukryte = set()
+    for w in wiersze:
+        kat, stem = klucz(w)
+        baza = baza_pomocniczego(stem)
+        if baza is None:
+            continue
+        if (kat, baza) in po_kluczu:
+            ukryte.add(id(w))
+        elif not stem.endswith(SUFIKSY_PLANU) and any(
+                (kat, baza + s) in po_kluczu for s in SUFIKSY_PLANU):
+            ukryte.add(id(w))
+    wynik = []
+    for w in wiersze:
+        if id(w) in ukryte:
+            continue
+        kat, stem = klucz(w)
+        baza = baza_pomocniczego(stem) if stem.endswith(SUFIKSY_PLANU) else None
+        baza = baza or stem
+        plik = Path(w['plik'])
+        zal = []
+        for suf in SUFIKSY_POMOCNICZE:
+            p = plik.with_name(baza + suf + '.md')
+            if p.name != plik.name and p.is_file():
+                zal.append(p)
+        w = dict(w)
+        w['zalaczniki'] = zal
+        wynik.append(w)
+    return wynik
 
 
 # ── Stan: decyzje, odsłuch, ustawienia widoku ───────────────────────────────
