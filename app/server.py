@@ -31,6 +31,92 @@ try:
 except Exception:
     _markdown = None
 
+try:
+    import nh3 as _nh3                # sanityzacja HTML z Markdown (audyt A3)
+except Exception:
+    _nh3 = None
+
+
+# ── Bezpieczeństwo treści (audyt: A3, B1, B2, C5) ───────────────────────────
+# Jedna definicja każdej funkcji ochronnej; używane we wszystkich widokach.
+
+def _esc(s) -> str:
+    """Tekst do HTML (treść ORAZ wartość atrybutu w cudzysłowie): & < > " '."""
+    return _html.escape(str(s), quote=True)
+
+
+def _json_do_script(obj) -> str:
+    """JSON bezpieczny wewnątrz <script>…</script>: „<" jako \\u003c (nie da się
+    zamknąć znacznika ani otworzyć komentarza <!--), U+2028/U+2029 jako ucieczki
+    (dawne silniki JS traktowały je jak koniec wiersza). Wynik to nadal poprawny
+    JSON — JSON.parse/literał JS daje dokładnie te same dane."""
+    import json as _json
+    return (_json.dumps(obj, ensure_ascii=False)
+            .replace('<', '\\u003c')
+            .replace(' ', '\\u2028')
+            .replace(' ', '\\u2029'))
+
+
+# Escapowanie po stronie przeglądarki (to samo co _esc) — jedna definicja JS,
+# wklejana do skryptów, które budują HTML z danych (CSV, XLSX, kolejka lektora).
+JS_ESC = ("function esc(s){return String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;',"
+          "'<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));}")
+
+# Obce źródła skryptów dopuszczone w CSP: MathJax (wzory w podglądzie .md)
+# i Three.js (podgląd modeli 3D). Dane (connect-src, img-src) — wyłącznie własny
+# origin, więc wstrzyknięty skrypt nie wyśle treści vaulta na zewnątrz fetch-em
+# ani obrazkiem-sygnałem.
+CDN_SKRYPTY = ('https://cdn.jsdelivr.net', 'https://unpkg.com')
+CDN_CZCIONKI = ('https://cdn.jsdelivr.net',)    # czcionki MathJax CHTML
+
+# Pliki, które przeglądarka wykonałaby jako dokument ze skryptami (HTML, SVG,
+# XML/XHTML) — przy zwykłym serwowaniu dostają CSP „sandbox" bez allow-scripts:
+# treść da się obejrzeć, ale skrypt nie ruszy, a origin jest nieprzezroczysty.
+EXT_AKTYWNE = {'.html', '.htm', '.xhtml', '.svg', '.svgz', '.xml', '.xsl', '.xslt'}
+
+
+def _csp(pdf: bool = False) -> str:
+    skr = ' '.join(CDN_SKRYPTY)
+    czc = ' '.join(CDN_CZCIONKI)
+    dyr = [
+        "default-src 'self'",
+        f"script-src 'self' 'unsafe-inline' {skr}",
+        "style-src 'self' 'unsafe-inline'",
+        "connect-src 'self'",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        f"font-src 'self' data: {czc}",
+        "worker-src 'self' blob:",
+        "frame-src 'self'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'self'",
+    ]
+    if not pdf:
+        # wbudowana przeglądarka PDF (Chrome) bywa blokowana przez object-src
+        # na odpowiedzi z samym PDF-em — tam dyrektywę pomijamy
+        dyr.insert(8, "object-src 'none'")
+    return '; '.join(dyr)
+
+
+_CSP = _csp()
+_CSP_PDF = _csp(pdf=True)
+
+
+async def _naglowki_bezpieczenstwa(request, response):
+    """on_response_prepare: KAŻDA odpowiedź (strony, pliki, JSON, błędy 4xx/5xx,
+    ekrany logowania) dostaje nagłówki bezpieczeństwa. CSP ustawiona wcześniej
+    przez widok (np. „sandbox" dla plików aktywnych) jest dołączana, nie gubiona."""
+    h = response.headers
+    pdf = h.get('Content-Type', '').startswith('application/pdf')
+    wlasna = h.get('Content-Security-Policy')
+    baza = _CSP_PDF if pdf else _CSP
+    h['Content-Security-Policy'] = baza + (f'; {wlasna}' if wlasna else '')
+    h['X-Content-Type-Options'] = 'nosniff'
+    h['Referrer-Policy'] = 'no-referrer'
+    h['X-Frame-Options'] = 'SAMEORIGIN'      # drzewo (?explorer) osadza własne strony
+    h['Server'] = 'AnberFiles'               # bez wersji Pythona i aiohttp (C5)
+
 
 def _battery_html() -> str:
     """Poziom baterii konsoli (PMIC axp2202) do linii informacyjnej —
@@ -451,7 +537,7 @@ def render_audio_page(target: Path) -> str:
     a_next = (f'<a href="{nxt}" id="next">następny →</a>' if nxt
               else '<a id="next" class="dis">następny →</a>')
     q = quote(target.name)
-    cur_js = __import__('json').dumps(target.name)
+    cur_js = _json_do_script(target.name)
     spd_btns = ''.join(
         f'<button class="sp" data-s="{s}">{s}×</button>'
         for s in ('0.75', '1', '1.25', '1.5', '2'))
@@ -478,11 +564,11 @@ def render_audio_page(target: Path) -> str:
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>♪ {target.name}</title><style>{AUDIO_STYLE}</style>'
+        f'<title>♪ {_esc(target.name)}</title><style>{AUDIO_STYLE}</style>'
         f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
         f'<span id="cnt" style="color:#8a93a0">{idx + 1} / {len(sibs)}</span>'
         f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
-        f'<div class="wrap"><div class="tname">🎵 {target.name}</div>'
+        f'<div class="wrap"><div class="tname">🎵 {_esc(target.name)}</div>'
         f'<audio id="au" controls autoplay src="{q}"></audio>'
         f'<div class="spd">tempo: {spd_btns}</div>{chaps_html}</div>'
         '<script>(function(){'
@@ -570,7 +656,7 @@ TABLE_STYLE = (
 CSV_TABLE_JS = r'''(function(){
 const SEP={comma:',',semicolon:';',tab:'\t',pipe:'|',space:' '};
 const MAXROWS=4000,$=id=>document.getElementById(id);
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+''' + JS_ESC + r'''
 function detect(t){const ln=(t.split(/\r?\n/).find(l=>l.trim())||'');
  let best=',',bn=-1;for(const d of[',',';','\t','|']){const c=ln.split(d).length-1;if(c>bn){bn=c;best=d;}}
  return bn>0?best:',';}
@@ -618,7 +704,7 @@ document.addEventListener('keydown',e=>{
 XLSX_TABLE_JS = r'''(function(){
 if(typeof SHEETS==='undefined'||!SHEETS||!SHEETS.length){return;}
 const $=id=>document.getElementById(id);
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+''' + JS_ESC + r'''
 let active=0;try{const v=parseInt(localStorage.getItem('xlsxSheet'));
  if(v>=0&&v<SHEETS.length)active=v;}catch(e){}
 function tabs(){const t=$('tabs');if(SHEETS.length<2){t.style.display='none';return;}
@@ -717,7 +803,6 @@ def _xlsx_to_sheets(target: Path, max_rows: int = 4000, max_cols: int = 80):
 def render_csv_page(target: Path) -> str:
     """Podgląd CSV/TSV (?view=1): tabela z wyborem separatora (auto/,/;/Tab/|/spacja)
     + przełącznik Tabela/Kod. Parsowanie w przeglądarce (live), stan UI w localStorage."""
-    import json as _json
     sibs = sorted((x.name for x in target.parent.iterdir()
                    if x.is_file() and x.suffix.lower() in CSV_EXT
                    and not x.name.startswith('.')), key=_natkey)
@@ -730,7 +815,7 @@ def render_csv_page(target: Path) -> str:
               else '<a id="next" class="dis">następny →</a>')
     q = quote(target.name)
     text = _read_text_best(target)
-    raw_js = _json.dumps(text).replace('</', '<\\/')
+    raw_js = _json_do_script(text)
     # ustaw domyślny wybór separatora w <select> wg sniffu serwerowego
     snif = _sniff_delim(text)
     sel = {',': 'comma', ';': 'semicolon', '\t': 'tab', '|': 'pipe'}.get(snif, 'auto')
@@ -742,7 +827,7 @@ def render_csv_page(target: Path) -> str:
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>▦ {target.name}</title><style>{TABLE_STYLE}</style>'
+        f'<title>▦ {_esc(target.name)}</title><style>{TABLE_STYLE}</style>'
         f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
         f'<span class="name">{_html.escape(target.name)}</span>'
         f'<span class="cnt">{idx + 1} / {len(sibs)}</span>'
@@ -762,7 +847,6 @@ def render_csv_page(target: Path) -> str:
 
 def render_xlsx_page(target: Path) -> str:
     """Podgląd XLSX/XLSM (?view=1): arkusze jako tabele (zakładki), openpyxl."""
-    import json as _json
     sibs = sorted((x.name for x in target.parent.iterdir()
                    if x.is_file() and x.suffix.lower() in XLSX_EXT
                    and not x.name.startswith('.')), key=_natkey)
@@ -776,7 +860,7 @@ def render_xlsx_page(target: Path) -> str:
     q = quote(target.name)
     try:
         sheets = _xlsx_to_sheets(target)
-        data_js = _json.dumps(sheets, ensure_ascii=False).replace('</', '<\\/')
+        data_js = _json_do_script(sheets)
         body = ('<div class="tabs" id="tabs"></div>'
                 '<div class="wrap"><div id="tbl"></div></div>')
     except Exception as e:
@@ -786,7 +870,7 @@ def render_xlsx_page(target: Path) -> str:
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>▦ {target.name}</title><style>{TABLE_STYLE}</style>'
+        f'<title>▦ {_esc(target.name)}</title><style>{TABLE_STYLE}</style>'
         f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
         f'<span class="name">{_html.escape(target.name)}</span>'
         f'<span class="cnt">{idx + 1} / {len(sibs)}</span>'
@@ -1023,9 +1107,29 @@ def _md_render(src: str) -> str:
     s = re.sub(r'\$[^$\n]+?\$', _stash, s)
     html = _markdown.markdown(
         s, extensions=['tables', 'fenced_code', 'nl2br', 'sane_lists'])
+    # wzór wraca jako TEKST (escapowany): MathJax czyta treść tekstową, więc
+    # „a < b" działa, a „$<script>…$" nie staje się znacznikiem
     for i, tex in enumerate(store):
-        html = html.replace(f'\x00M{i}\x00', tex)
-    return html
+        html = html.replace(f'\x00M{i}\x00', _html.escape(tex, quote=False))
+    return _sanityzuj_html(html)
+
+
+def _sanityzuj_html(html: str) -> str:
+    """HTML z treści użytkownika (Markdown) → tylko znaczniki i atrybuty
+    bezpieczne (lista dozwolonych nh3): bez <script>, on*=, javascript:, <iframe>.
+    Brak nh3 = cały wynik escapowany do tekstu — NIGDY render bez sanityzacji."""
+    if _nh3 is None:
+        return ('<p><i>(brak biblioteki nh3 — HTML pokazany jako tekst)</i></p>'
+                f'<pre>{_html.escape(html)}</pre>')
+    attrs = {t: set(a) for t, a in _nh3.ALLOWED_ATTRIBUTES.items()}
+    for t in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        attrs.setdefault(t, set()).add('id')
+    attrs.setdefault('code', set()).add('class')            # language-xxx
+    for t in ('th', 'td'):
+        attrs.setdefault(t, set()).update({'style', 'align'})
+    attrs.setdefault('img', set()).update({'alt', 'title', 'src', 'width', 'height'})
+    return _nh3.clean(html, attributes=attrs,
+                      filter_style_properties={'text-align'})
 
 
 VIDEO_STYLE = (
@@ -1063,9 +1167,9 @@ def render_video_page(target: Path) -> str:
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>🎬 {target.name}</title><style>{VIDEO_STYLE}</style>'
+        f'<title>🎬 {_esc(target.name)}</title><style>{VIDEO_STYLE}</style>'
         f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
-        f'<span class="name">{target.name}</span>'
+        f'<span class="name">{_esc(target.name)}</span>'
         f'<span class="cnt">{idx + 1} / {len(sibs)}</span>'
         f'<span class="cnt" id="fps" title="Klatki na sekundę (z odtwarzania)">FPS: –</span>'
         f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
@@ -1116,7 +1220,7 @@ def render_md_page(target: Path) -> str:
     if aud is not None:
         aurl = _url_abs(aud)
         chaps = _audio_chapters(aud, src)
-        chaps_js = __import__('json').dumps(chaps, ensure_ascii=False)
+        chaps_js = _json_do_script(chaps)
         chrows = ''
         if chaps:
             def _ms(t):
@@ -1169,7 +1273,7 @@ def render_md_page(target: Path) -> str:
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>{target.name}</title><style>{MD_STYLE}</style>'
+        f'<title>{_esc(target.name)}</title><style>{MD_STYLE}</style>'
         '<script>window.MathJax={tex:{inlineMath:[["$","$"]],'
         'displayMath:[["$$","$$"]]}};</script>'
         '<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/'
@@ -1182,7 +1286,7 @@ def render_md_page(target: Path) -> str:
         f'<span id="zlbl" title="Kliknij = 100%" style="color:#bbb;min-width:3.4em;'
         f'text-align:center;cursor:pointer;align-self:center;font-size:.9em">100%</span>'
         f'<button id="zin" title="Większy tekst (Ctrl + / Ctrl+scroll)">A+</button>'
-        f'<span class="name">{target.name}</span>'
+        f'<span class="name">{_esc(target.name)}</span>'
         f'<span style="color:#888">{idx + 1} / {len(sibs)}</span>'
         f'<a href="{q}?dl=1">⬇ pobierz</a>'
         + (f'<a href="{q}?docx=1" id="docxbtn" title="Eksport do Word (.docx) — '
@@ -1247,7 +1351,7 @@ def render_md_page(target: Path) -> str:
         'setTimeout(()=>a.textContent="🖨 drukuj",4000);};'
         # eksport DOCX z paskiem postępu (jak lektor): fetch blob + poll ?docxprog
         'const dxb=document.getElementById("docxbtn");'
-        f'const DXN={__import__("json").dumps(target.stem)};'
+        f'const DXN={_json_do_script(target.stem)};'
         'if(dxb){dxb.onclick=async function(e){e.preventDefault();'
         'if(dxb.dataset.busy)return;dxb.dataset.busy="1";'
         'const dp=document.getElementById("docxprog");'
@@ -1392,7 +1496,7 @@ LEKTOR_BAR_JS = (
 # Akcje plikowe: 🗑 usuń (→.kosz), ✎ zmień nazwę (prompt → POST ?rename=),
 # ⧉ kopiuj nazwę do schowka.
 DEL_JS = (
-    '<script>'
+    '<script>' + JS_ESC +
     # modal wyboru formatu — RADIOBUTTONY per format + Generuj/Anuluj
     'function pickFmt(name){return new Promise(res=>{'
     'const ov=document.createElement("div");'
@@ -1418,7 +1522,7 @@ DEL_JS = (
     'padding:1.1em 1.4em;max-width:92vw;min-width:300px;'
     'box-shadow:0 8px 30px rgba(0,0,0,.35)">'
     '<div style="font-weight:600;margin-bottom:.35em;word-break:break-all">'
-    '🔊 Lektor: \'+name+\'</div>'
+    '🔊 Lektor: \'+esc(name)+\'</div>'
     '<div style="color:#556;font-size:.9em;margin-bottom:.7em">'
     'Format nagrania (generacja dłuższych dokumentów może potrwać '
     'kilkanaście minut):</div>\'+radios+(window._LEK_OPISY===false?"":'
@@ -2237,10 +2341,10 @@ async def serve(request):
                 dd_items = []
                 for s in sibs:
                     cls = ' class="cur"' if s == seg else ''
-                    dd_items.append(f'<a href="{parent_url}/{quote(s)}/"{cls}>📁 {s}</a>')
+                    dd_items.append(f'<a href="{parent_url}/{quote(s)}/"{cls}>📁 {_esc(s)}</a>')
                 dd = (f'<div class="dd">{"".join(dd_items)}</div>') if dd_items else ''
                 crumbs.append(f'<span class="crumb">'
-                              f'<a href="{quote(acc)}/">{seg}</a>{dd}</span>')
+                              f'<a href="{quote(acc)}/">{_esc(seg)}</a>{dd}</span>')
                 parent = parent / seg
         breadcrumb = ' <span class="sep">/</span> '.join(crumbs) + ' <span class="sep">/</span>'
 
@@ -2270,7 +2374,7 @@ async def serve(request):
                            if zapis else '')
                         + f'<a href="#" class="dl cpy" data-n="{dq}" title="Kopiuj nazwę">⧉</a>'
                         f'<a href="{dq}/?zip=1" class="dl" title="Pobierz folder jako .zip">🗜</a>'
-                        f'<a href="{item.name}/" class="dir">📁 {item.name}/</a></td>'
+                        f'<a href="{dq}/" class="dir">📁 {_esc(item.name)}/</a></td>'
                         f'<td data-sort="-1">—</td>'
                         f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
                         f'<td data-sort="{bt:.0f}">{bt_s}</td></tr>')
@@ -2304,7 +2408,7 @@ async def serve(request):
                            if zapis else '')
                         + f'<a href="#" class="dl cpy" data-n="{q}" title="Kopiuj nazwę">⧉</a>'
                         f'{lek}'
-                        f'<a href="{href}">{icon} {item.name}</a></td>'
+                        f'<a href="{href}">{icon} {_esc(item.name)}</a></td>'
                         f'<td data-sort="{s}">{_fmt_size(s)}</td>'
                         f'<td data-sort="{st.st_mtime:.0f}">{mt_s}</td>'
                         f'<td data-sort="{bt:.0f}">{bt_s}</td></tr>')
@@ -2316,7 +2420,7 @@ async def serve(request):
             '<!doctype html><meta charset=utf-8>',
             '<meta name="viewport" content="width=device-width,initial-scale=1">',
             FAVICON_LINK,
-            f'<title>{rel_url}</title>',
+            f'<title>{_esc(rel_url)}</title>',
             f'<style>{STYLE}</style>',
             f'<h2>{breadcrumb}</h2>',
             f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
@@ -2699,7 +2803,7 @@ LEKTORQ_PAGE = (
     '<tbody id="tb"></tbody></table>'
     '<div id="ebw" style="display:none"><h2 style="color:#c00">✖ Nieudane zadania '
     'lektora</h2><table><tbody id="eb"></tbody></table></div>'
-    '<script>'
+    '<script>' + JS_ESC +
     'async function load(){'
     'try{const j=await(await fetch("/?lektorqj=1",{cache:"no-store"})).json();'
     'const tb=document.getElementById("tb");let h="";let i=0;'
@@ -2715,7 +2819,7 @@ LEKTORQ_PAGE = (
     '⏸ KOLEJKA WSTRZYMANA &nbsp; '
     '<a id=res href=# style=\'color:#1a5fb4\'>▶ wznów</a></td></tr>";}'
     'if(j.external){h+="<tr><td>—</td><td colspan=3>"'
-    '+(j.ext_out?j.ext_out+" <span class=ext>(proces niezależny — '
+    '+(j.ext_out?esc(j.ext_out)+" <span class=ext>(proces niezależny — '
     'zlecenie agenta albo kontynuacja po restarcie serwera)</span>"'
     ':"<span class=ext>lektor uruchomiony poza serwerem '
     '(agent Discord / CLI)</span>")'
@@ -2724,8 +2828,8 @@ LEKTORQ_PAGE = (
     '+acts("ext",!j.paused)+"</tr>";}'
     'for(const x of j.jobs){i++;'
     'const run=(x.state==="running");'
-    'h+="<tr><td>"+i+"</td><td>"+x.out+"</td><td style=\'color:#888\'>"'
-    '+x.src+"</td><td>"+x.fmt+"</td><td class="'
+    'h+="<tr><td>"+i+"</td><td>"+esc(x.out)+"</td><td style=\'color:#888\'>"'
+    '+esc(x.src)+"</td><td>"+esc(x.fmt)+"</td><td class="'
     '+(run?"run":"que")+">"'
     '+(x.state==="paused"?"⏸ wstrzymane":(run?bar(x.pct,x.chunk):"czeka"))'
     '+"</td>"+acts(x.id,run)+"</tr>";}'
@@ -2737,8 +2841,8 @@ LEKTORQ_PAGE = (
     'sh.style.display=(j.wylaczanie===false)?"none":"";'
     'const eb=document.getElementById("eb");let eh="";'
     'for(const b of (j.bledy||[]).slice().reverse()){'
-    'eh+="<tr><td>✖</td><td>"+b.out+"</td><td style=\'color:#888\'>"+b.src'
-    '+"</td><td colspan=3 style=\'color:#c00\'>"+b.czas+" — "+b.blad+"</td></tr>";}'
+    'eh+="<tr><td>✖</td><td>"+esc(b.out)+"</td><td style=\'color:#888\'>"+esc(b.src)'
+    '+"</td><td colspan=3 style=\'color:#c00\'>"+esc(b.czas)+" — "+esc(b.blad)+"</td></tr>";}'
     'eb.innerHTML=eh;document.getElementById("ebw").style.display=eh?"":"none";'
     'sh.dataset.on=j.shutdown?"1":"0";'
     'sh.innerHTML=j.shutdown'
@@ -3421,13 +3525,13 @@ async def _serve_file(request, target):
             aq = _url_abs(aud)
             audio_html = (
                 '<audio id="lek" controls preload="metadata" '
-                f'src="{aq}" title="{aud.name}"></audio>')
+                f'src="{aq}" title="{_esc(aud.name)}"></audio>')
         else:
             audio_html = ''
         page = (
             '<!doctype html><meta charset=utf-8>'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{target.name}</title>'
+            f'<title>{_esc(target.name)}</title>'
             '<style>body{margin:0;height:100vh;display:flex;'
             'flex-direction:column}'
             '.bar{display:flex;gap:.6em;align-items:center;padding:.4em .9em;'
@@ -3443,7 +3547,7 @@ async def _serve_file(request, target):
             'sans-serif;text-align:center;padding:1em;font-size:1.05em}'
             '#cvt.hide{display:none}</style>'
             f'<div class="bar"><a href="./">📁 folder</a>'
-            f'<span style="word-break:break-all">{target.name}</span>'
+            f'<span style="word-break:break-all">{_esc(target.name)}</span>'
             f'<span id="st" style="color:#8a93a0"></span>'
             + (f'<a href="{q}?read=1" style="color:#6fce8f;'
                'border-color:#2f6b46">📖 śledź tekst</a>' if cue
@@ -3511,16 +3615,16 @@ async def _serve_file(request, target):
         html = (
             '<!doctype html><meta charset=utf-8>'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{target.name}</title><style>{VIEWER_STYLE}</style>'
+            f'<title>{_esc(target.name)}</title><style>{VIEWER_STYLE}</style>'
             f'<div class="bar"><a href="./">📁 folder</a>{a_prev}{a_next}'
-            f'<span class="name">{target.name}</span>'
+            f'<span class="name">{_esc(target.name)}</span>'
             f'<span class="cnt">{idx+1} / {len(names)}</span>'
             f'<span class="cnt" id="zl">100%</span>'
             f'<a href="#" id="fitb" title="Dopasuj do okna (dwuklik / klawisz 0)">⊡ dopasuj</a>'
             f'<a href="#" id="natb" title="Rozmiar naturalny (klawisz 1)">1:1</a>'
             f'{crop_btn}'
             f'<a href="{quote(target.name)}?dl=1">⬇ pobierz</a></div>'
-            f'<div class="stage"><img src="{quote(target.name)}?v={target.stat().st_mtime:.0f}" alt="{target.name}"></div>'
+            f'<div class="stage"><img src="{quote(target.name)}?v={target.stat().st_mtime:.0f}" alt="{_esc(target.name)}"></div>'
             '<div class="cropov" id="cropov"></div>'
             '<div class="cropbox" id="cropbox">'
             '<i class="h nw"></i><i class="h ne"></i><i class="h sw"></i><i class="h se"></i>'
@@ -3573,6 +3677,10 @@ async def _serve_file(request, target):
     ctype, _ = mimetypes.guess_type(target.name)
     if (ctype and ctype.startswith('text/')) or target.suffix.lower() in TEXT_EXT:
         headers['Content-Type'] = f'{ctype or "text/plain"}; charset=utf-8'
+    if target.suffix.lower() in EXT_AKTYWNE:
+        # HTML/SVG/XML z vaulta: podgląd tak, skrypty nie (A3); <img src=x.svg>
+        # w przeglądarce zdjęć działa dalej — obraz i tak nie wykonuje skryptów
+        headers['Content-Security-Policy'] = 'sandbox'
     return web.FileResponse(target, headers=headers)
 
 
@@ -3668,6 +3776,7 @@ def utworz_aplikacje(k):
     # client_max_size: limit żądania POST (upload) — domyślny 1 MB to za mało
     app = web.Application(middlewares=[errlog, auth],
                           client_max_size=512 * 1024 ** 2)
+    app.on_response_prepare.append(_naglowki_bezpieczenstwa)   # CSP itd. (A3, C5)
     app.on_startup.append(_lektor_restore)        # NAJPIERW wczytaj kolejkę
     app.on_startup.append(_cleanup_parts)         # potem sprzątaj porzucone
     app.router.add_get('/{path:.*}', serve)

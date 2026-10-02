@@ -1,6 +1,7 @@
 # Zależności serwera (app/) i lektora (tools/czytaj_tts.py)
 aiohttp
 markdown
+nh3                 # sanityzacja HTML podglądu .md (bez niej: HTML pokazany jako tekst)
 openpyxl
 python-docx
 Pillow
