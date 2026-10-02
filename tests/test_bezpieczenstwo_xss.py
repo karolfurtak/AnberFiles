@@ -200,19 +200,21 @@ def test_naglowki_403_i_formularz_jarvis(tmp_path):
 
 # ── B1: nazwy plików w HTML ─────────────────────────────────────────────────
 
-@pytest.mark.skipif(sys.platform == 'win32', reason='Windows nie pozwala na < > w nazwie')
+@pytest.mark.skipif(sys.platform == 'win32', reason='Windows nie pozwala na < > " w nazwie')
 def test_listing_escapuje_znaczniki_w_nazwie(tmp_path):
+    """Znacznik w nazwie pliku/katalogu (bez „/", który jest separatorem ścieżki)."""
     k, korzen = _anbernic(tmp_path)
-    (korzen / '<b>x</b>.txt').write_text('x', encoding='utf-8')
-    (korzen / '<i>k</i>').mkdir()
-    (korzen / '<i>k</i>' / '"q" <s>.md').write_text('# t', encoding='utf-8')
+    (korzen / '<b>x<b>.txt').write_text('x', encoding='utf-8')
+    (korzen / '<i>k<i>').mkdir()
+    (korzen / '<i>k<i>' / '"q" <s>.md').write_text('# t', encoding='utf-8')
     _, _, html = _get(k, '/')
-    assert '<b>x</b>' not in html and '<i>k</i>' not in html
-    assert '&lt;b&gt;x&lt;/b&gt;.txt' in html
-    assert '&lt;i&gt;k&lt;/i&gt;/' in html
-    _, _, html = _get(k, '/' + quote('<i>k</i>') + '/')
-    assert '<i>k</i>' not in html                     # okruszki i <title>
-    _, _, html = _get(k, '/' + quote('<i>k</i>/"q" <s>.md') + '?view=1')
+    assert '<b>x<b>' not in html and '<i>k<i>' not in html
+    assert '&lt;b&gt;x&lt;b&gt;.txt' in html
+    assert '&lt;i&gt;k&lt;i&gt;/' in html
+    _, _, html = _get(k, '/' + quote('<i>k<i>') + '/')
+    assert '<i>k<i>' not in html                      # okruszki i <title>
+    assert '&quot;q&quot; &lt;s&gt;.md' in html
+    _, _, html = _get(k, '/' + quote('<i>k<i>/"q" <s>.md') + '?view=1')
     assert '<s>' not in html and '"q"' not in html
 
 
