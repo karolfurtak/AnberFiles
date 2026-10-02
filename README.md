@@ -126,3 +126,9 @@ Otwórz `http://IP_KONSOLI:8765/` w przeglądarce.
   (`urllib.parse.quote`).
 - Auto-odświeżanie i sortowanie nie gryzą się: po podmianie tabeli przywracany
   jest zapamiętany porządek.
+
+---
+
+## Licencja
+
+Copyright (c) 2026 Karol Furtak. **Wszelkie prawa zastrzeżone.** Użycie komercyjne, kopiowanie, rozpowszechnianie i modyfikowanie wyłącznie za pisemną zgodą autora — szczegóły w pliku [LICENSE](LICENSE).
