@@ -167,6 +167,23 @@ def _natkey(s: str):
     """Klucz sortowania naturalnego: 'plik_10' PO 'plik_9' (liczby jako liczby)."""
     return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
 
+
+def _jest_katalogiem_bezpiecznie(p) -> bool:
+    """Path.is_dir() bez wyjątków: EPERM/EACCES/EIO (np. dowiązanie z bezwzględnym
+    celem na innym komputerze, zdalny sshfs) dają False, nie wywracają listingu."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
+def _jest_plikiem_bezpiecznie(p) -> bool:
+    """Path.is_file() bez wyjątków — jak _jest_katalogiem_bezpiecznie."""
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
 # Ustawienia instancji — wartości przypisuje zastosuj_konfiguracje() (przy
 # imporcie: domyślne Anbernica; main() i testy podają właściwe).
 KONF = None
@@ -611,7 +628,7 @@ def render_audio_page(target: Path) -> str:
     """Odtwarzacz audio (?view=1): natywny <audio>, poprzedni/następny
     w katalogu, regulacja tempa (lektor!), autoodtwarzanie."""
     sibs = sorted((x.name for x in target.parent.iterdir()
-                   if x.is_file() and x.suffix.lower() in AUDIO_EXT
+                   if _jest_plikiem_bezpiecznie(x) and x.suffix.lower() in AUDIO_EXT
                    and not x.name.startswith('.')), key=_natkey)
     idx = sibs.index(target.name) if target.name in sibs else 0
     prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
@@ -888,7 +905,7 @@ def render_csv_page(target: Path) -> str:
     """Podgląd CSV/TSV (?view=1): tabela z wyborem separatora (auto/,/;/Tab/|/spacja)
     + przełącznik Tabela/Kod. Parsowanie w przeglądarce (live), stan UI w localStorage."""
     sibs = sorted((x.name for x in target.parent.iterdir()
-                   if x.is_file() and x.suffix.lower() in CSV_EXT
+                   if _jest_plikiem_bezpiecznie(x) and x.suffix.lower() in CSV_EXT
                    and not x.name.startswith('.')), key=_natkey)
     idx = sibs.index(target.name) if target.name in sibs else 0
     prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
@@ -932,7 +949,7 @@ def render_csv_page(target: Path) -> str:
 def render_xlsx_page(target: Path) -> str:
     """Podgląd XLSX/XLSM (?view=1): arkusze jako tabele (zakładki), openpyxl."""
     sibs = sorted((x.name for x in target.parent.iterdir()
-                   if x.is_file() and x.suffix.lower() in XLSX_EXT
+                   if _jest_plikiem_bezpiecznie(x) and x.suffix.lower() in XLSX_EXT
                    and not x.name.startswith('.')), key=_natkey)
     idx = sibs.index(target.name) if target.name in sibs else 0
     prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
@@ -1270,7 +1287,7 @@ def render_video_page(target: Path) -> str:
     (FileResponse obsługuje Range), poprzedni/następny w katalogu, strzałki = seek
     (natywne), N/P = poprzedni/następny plik."""
     sibs = sorted((x.name for x in target.parent.iterdir()
-                   if x.is_file() and x.suffix.lower() in VIDEO_EXT
+                   if _jest_plikiem_bezpiecznie(x) and x.suffix.lower() in VIDEO_EXT
                    and not x.name.startswith('.')), key=_natkey)
     idx = sibs.index(target.name) if target.name in sibs else 0
     prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
@@ -1377,7 +1394,7 @@ def render_md_page(target: Path) -> str:
             '})();</script>')
     # nawigacja po plikach .md w tym katalogu (jak w viewerze zdjec)
     sibs = sorted((x.name for x in target.parent.iterdir()
-                   if x.is_file() and x.suffix.lower() == '.md'
+                   if _jest_plikiem_bezpiecznie(x) and x.suffix.lower() == '.md'
                    and not x.name.startswith('.')), key=_natkey)
     idx = sibs.index(target.name) if target.name in sibs else 0
     prv = quote(sibs[idx - 1]) + '?view=1' if idx > 0 else None
@@ -2467,7 +2484,7 @@ def render_events_page():
 def _dir_children(p):
     try:
         return sorted((d for d in p.iterdir()
-                       if d.is_dir() and not d.name.startswith('.')),
+                       if _jest_katalogiem_bezpiecznie(d) and not d.name.startswith('.')),
                       key=lambda d: _natkey(d.name))
     except Exception:
         return []
@@ -2747,12 +2764,16 @@ class _OdczytKatalogu(Exception):
 
 
 def _proba_katalogu(p):
-    """Próba odczytu: scandir + stat() każdego wpisu (to, co zrobi listing)."""
+    """Próba odczytu: scandir + stat() każdego wpisu (to, co zrobi listing).
+    503 tylko gdy nie da się otworzyć/iterować SAMEGO katalogu."""
     with os.scandir(p) as it:
         for e in it:
             try:
                 e.stat()
-            except FileNotFoundError:        # wpis zniknął / zerwany symlink
+            except OSError:
+                # błąd pojedynczego wpisu (zerwany symlink, EPERM na sshfs)
+                # nie unieważnia katalogu — listing pomija go sam; zawieszony
+                # stat() nadal liczy się do limitu czasu (504)
                 continue
 
 
@@ -2870,7 +2891,7 @@ async def serve(request):
     # lista rodzeństwa audio (do odświeżania prev/next w odtwarzaczu na żywo)
     if 'siblings' in request.query and target.is_file():
         sibs = sorted((x.name for x in target.parent.iterdir()
-                       if x.is_file() and x.suffix.lower() in AUDIO_EXT
+                       if _jest_plikiem_bezpiecznie(x) and x.suffix.lower() in AUDIO_EXT
                        and not x.name.startswith('.')), key=_natkey)
         return web.json_response(sibs, headers={'Cache-Control': 'no-cache'})
 
@@ -2878,7 +2899,7 @@ async def serve(request):
         return await _zip_dir(request, target)
 
     if jest_katalogiem:
-        items = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), _natkey(p.name)))
+        items = sorted(target.iterdir(), key=lambda p: (not _jest_katalogiem_bezpiecznie(p), _natkey(p.name)))
         rel = target.relative_to(ROOT)
         rel_url = f'/{rel}/' if str(rel) != '.' else '/'
 
@@ -2893,7 +2914,7 @@ async def serve(request):
                 acc += '/' + seg
                 try:
                     sibs = sorted((d.name for d in parent.iterdir()
-                                   if d.is_dir() and not d.name.startswith('.')),
+                                   if _jest_katalogiem_bezpiecznie(d) and not d.name.startswith('.')),
                                   key=_natkey)
                 except Exception:
                     sibs = []
@@ -2923,7 +2944,7 @@ async def serve(request):
                 st = item.stat()
                 bt = getattr(st, 'st_birthtime', st.st_ctime)   # crtime jeśli dostępny, inaczej ctime
                 mt_s, bt_s = _fmt_time(st.st_mtime), _fmt_time(bt)
-                if item.is_dir():
+                if _jest_katalogiem_bezpiecznie(item):
                     dq = quote(item.name)
                     rows.append(
                         f'<tr data-name="{_html.escape(item.name, quote=True)}">'
@@ -4962,7 +4983,7 @@ async def _serve_file(request, target):
     if 'view' in request.query and target.suffix.lower() in IMG_EXT:
         siblings = sorted(
             (p for p in target.parent.iterdir()
-             if p.is_file() and p.suffix.lower() in IMG_EXT
+             if _jest_plikiem_bezpiecznie(p) and p.suffix.lower() in IMG_EXT
              and not p.name.startswith('.')),
             key=lambda p: p.name.lower())
         names = [p.name for p in siblings]
