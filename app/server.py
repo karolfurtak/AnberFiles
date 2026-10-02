@@ -186,6 +186,12 @@ def _modul_wylaczony(nazwa: str):
     return None
 
 
+# Ciało żądania wczytywane do pamięci w całości (request.read/post/json):
+# kadrowanie (JSON), formularze. Wgrywanie plików czyta strumieniowo i ma
+# osobny limit (limit_wgrywania_mb), logowanie — 4 KiB (logowanie.py).
+LIMIT_CIALA_ZADANIA = 64 * 1024
+
+
 # ── Rejestr zdarzeń i błędów (podgląd: /?events=1) ───────────────────────────
 _EVLOG_CAP = 2 * 1024 * 1024          # 2 MB — przytnij gdy urośnie
 
@@ -1967,6 +1973,149 @@ async def errlog(request, handler):
             status=500, text='500 — błąd serwera (zapisany w rejestrze /?events=1)')
 
 
+# ── Obserwacja pamięci (serwer + procesy potomne: soffice, lektor) ──────────
+# Jądro urządzeń nie ma kontrolera pamięci cgroup (MemoryMax w systemd nie
+# działa) — pamięć się obserwuje: pomiar co 60 s z /proc, szczyt i przekroczenie
+# progu trafiają do rejestru zdarzeń, stan widać na /?events=1.
+PAMIEC_CO_S = 60
+PAMIEC_OSTRZEZENIE_CO_S = 600       # ostrzeżenie o progu najwyżej raz na 10 min
+PAMIEC_SZCZYT_KROK = 1.10           # zapis nowego szczytu przy wzroście ≥ 10 %
+
+
+def _status_proc(plik: Path):
+    """(PPid, VmRSS w kB) z /proc/<pid>/status; None = proces zniknął."""
+    ppid = rss = None
+    try:
+        for linia in plik.read_text(encoding='utf-8', errors='replace').splitlines():
+            if linia.startswith('PPid:'):
+                ppid = int(linia.split()[1])
+            elif linia.startswith('VmRSS:'):
+                rss = int(linia.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return ppid, rss or 0                # wątki jądra nie mają VmRSS
+
+
+def zmierz_pamiec(pid: int = None, proc: Path = Path('/proc')):
+    """RSS procesu serwera i sumy jego potomków (rekurencyjnie: soffice →
+    soffice.bin) w MB; None, gdy /proc niedostępny (np. Windows w testach)."""
+    pid = os.getpid() if pid is None else pid
+    if not (proc / str(pid) / 'status').is_file():
+        return None
+    try:
+        wpisy = list(proc.iterdir())
+    except OSError:
+        return None
+    dzieci, rss = {}, {}
+    for d in wpisy:
+        if not d.name.isdigit():
+            continue
+        st = _status_proc(d / 'status')
+        if st is None:
+            continue
+        n = int(d.name)
+        dzieci.setdefault(st[0], []).append(n)
+        rss[n] = st[1]
+    potomne, stos, widziane = 0, list(dzieci.get(pid, ())), {pid}
+    while stos:
+        n = stos.pop()
+        if n in widziane:
+            continue
+        widziane.add(n)
+        potomne += rss.get(n, 0)
+        stos.extend(dzieci.get(n, ()))
+    serwer = rss.get(pid, 0)
+    return {'serwer_mb': round(serwer / 1024, 1), 'potomne_mb': round(potomne / 1024, 1),
+            'razem_mb': round((serwer + potomne) / 1024, 1)}
+
+
+class ObserwatorPamieci:
+    """Stan pomiarów pamięci; krok() = jeden pomiar i ewentualne wpisy w rejestrze.
+    pomiar, rejestr i zegar wstrzykiwane (testy)."""
+
+    def __init__(self, prog_mb: int, pomiar=None, rejestr=None, zegar=None):
+        import time
+        self.prog_mb = prog_mb
+        self.pomiar = pomiar or zmierz_pamiec
+        self.rejestr = rejestr or (lambda *a, **kw: _evlog(*a, **kw))
+        self.zegar = zegar or time.monotonic
+        self.teraz = None                # ostatni pomiar (słownik) albo None
+        self.szczyt_mb = 0.0
+        self._zapisany_szczyt = 0.0
+        self._ostatnie_ostrzezenie = None
+
+    @property
+    def teraz_mb(self):
+        return None if self.teraz is None else self.teraz['razem_mb']
+
+    def krok(self):
+        m = self.pomiar()
+        self.teraz = m
+        if m is None:
+            return None
+        razem = m['razem_mb']
+        self.szczyt_mb = max(self.szczyt_mb, razem)
+        if self.szczyt_mb > 0 and (
+                self._zapisany_szczyt == 0
+                or self.szczyt_mb >= self._zapisany_szczyt * PAMIEC_SZCZYT_KROK):
+            self._zapisany_szczyt = self.szczyt_mb
+            self.rejestr('pamiec', f'nowy szczyt pamięci: {self.szczyt_mb:.0f} MB '
+                         f'(serwer {m["serwer_mb"]:.0f} MB, procesy potomne '
+                         f'{m["potomne_mb"]:.0f} MB; próg {self.prog_mb} MB)')
+        if razem > self.prog_mb:
+            t = self.zegar()
+            if (self._ostatnie_ostrzezenie is None
+                    or t - self._ostatnie_ostrzezenie >= PAMIEC_OSTRZEZENIE_CO_S):
+                self._ostatnie_ostrzezenie = t
+                self.rejestr('pamiec', f'pamięć ponad próg: {razem:.0f} MB > '
+                             f'{self.prog_mb} MB (serwer {m["serwer_mb"]:.0f} MB, '
+                             f'procesy potomne {m["potomne_mb"]:.0f} MB)', level='warn')
+        return m
+
+    def stan(self) -> dict:
+        teraz = self.teraz_mb
+        return {'teraz_mb': teraz, 'szczyt_mb': self.szczyt_mb, 'prog_mb': self.prog_mb,
+                'przekroczony': teraz is not None and teraz > self.prog_mb}
+
+
+_PAMIEC = None
+
+
+async def _pamiec_petla():
+    while True:
+        try:
+            _PAMIEC.krok()
+        except Exception as e:           # pomiar nie może zatrzymać serwera
+            _evlog('pamiec', f'pomiar nieudany: {type(e).__name__}: {e}', level='error')
+        await asyncio.sleep(PAMIEC_CO_S)
+
+
+async def _pamiec_start(app):
+    app['pamiec_zadanie'] = asyncio.ensure_future(_pamiec_petla())
+
+
+async def _pamiec_stop(app):
+    z = app.get('pamiec_zadanie')
+    if z is not None:
+        z.cancel()
+
+
+def _pamiec_html() -> str:
+    """Stan pamięci w nagłówku rejestru zdarzeń (wyróżniony ponad progiem)."""
+    if _PAMIEC is None:
+        return ''
+    s = _PAMIEC.stan()
+    if s['teraz_mb'] is None:
+        return (f'<span class="pamiec">Pamięć: brak pomiaru (/proc niedostępny), '
+                f'próg {s["prog_mb"]} MB</span>')
+    tekst = (f'Pamięć: teraz {s["teraz_mb"]:.0f} MB, szczyt {s["szczyt_mb"]:.0f} MB, '
+             f'próg {s["prog_mb"]} MB')
+    if s['przekroczony']:
+        return ('<span class="pamiec pamiec-przekroczona" style="color:#ff6b6b;'
+                f'font-weight:600">⚠ {tekst} — ponad próg</span>')
+    return f'<span class="pamiec">{tekst}</span>'
+
+
 def _fmt_size(s):
     if s >= 1 << 30:
         return f'{s/(1<<30):.1f} GB'
@@ -2017,6 +2166,7 @@ def render_events_page():
         'padding:.4em .7em}</style>'
         '<div class="bar"><a href="./">📁 folder</a>'
         '<b>Rejestr zdarzeń i błędów</b>'
+        + _pamiec_html() +
         '<span style="color:#8a93a0;margin-left:auto">'
         f'{len(lines)} wpisów · auto-odświeżanie 10 s</span></div>'
         '<table><tr><th>czas</th><th>poziom</th><th>typ</th><th>opis</th></tr>'
@@ -3305,6 +3455,8 @@ async def crop_item(request):
         x = int(round(float(d['x']))); y = int(round(float(d['y'])))
         w = int(round(float(d['w']))); h = int(round(float(d['h'])))
         mode = d.get('mode', 'copy')
+    except web.HTTPException:            # 413: ciało ponad LIMIT_CIALA_ZADANIA
+        raise
     except Exception:
         return web.json_response({'error': 'Złe dane kadru'}, status=400)
     if w < 2 or h < 2:
@@ -3353,6 +3505,21 @@ async def crop_item(request):
     return web.json_response({'ok': True, 'file': out.name, 'mode': mode})
 
 
+class _WgrywanieZaDuze(Exception):
+    """Łączny rozmiar plików w żądaniu przekroczył limit_wgrywania_mb."""
+
+
+def _wgrywanie_za_duze(target: Path, rozmiar: int, saved=()) -> web.Response:
+    _evlog('upload', f'odrzucono wgrywanie do {target.relative_to(ROOT)}: '
+           f'ponad {KONF.limit_wgrywania_mb} MB (co najmniej {rozmiar >> 20} MB)'
+           + (f'; zapisane wcześniej w tym żądaniu: {len(saved)}' if saved else ''),
+           level='warn')
+    return web.json_response(
+        {'error': f'Wgrywanie większe niż {KONF.limit_wgrywania_mb} MB '
+                  '(limit_wgrywania_mb w ustawieniach).', 'saved': list(saved)},
+        status=413)
+
+
 async def upload(request):
     if 'print' in request.query:
         odm = _modul_wylaczony('druk')
@@ -3393,8 +3560,12 @@ async def upload(request):
         return web.Response(status=403)
     if not target.is_dir():
         return web.Response(status=400, text='Cel nie jest katalogiem')
+    limit = KONF.limit_wgrywania_mb * 1024 ** 2
+    if request.content_length is not None and request.content_length > limit:
+        return _wgrywanie_za_duze(target, request.content_length)
     saved = []
     skipped = 0
+    wczytano = 0                     # łącznie bajtów plików w tym żądaniu
     reader = await request.multipart()
     async for part in reader:
         if part.name != 'file' or not part.filename:
@@ -3427,8 +3598,14 @@ async def upload(request):
                     chunk = await part.read_chunk(64 * 1024)
                     if not chunk:
                         break
+                    wczytano += len(chunk)
+                    if wczytano > limit:
+                        raise _WgrywanieZaDuze()
                     f.write(chunk)
                     size += len(chunk)
+        except _WgrywanieZaDuze:
+            tmp.unlink(missing_ok=True)
+            return _wgrywanie_za_duze(target, wczytano, saved)
         except Exception:
             tmp.unlink(missing_ok=True)     # niedokończony -> SAM SIĘ KASUJE
             _evlog('upload', f'zerwany w pół, .part usunięty: {rel}',
@@ -3773,12 +3950,17 @@ def utworz_aplikacje(k):
     _LEKTOR_LOCK = None
     _LEKTOR_PAUSED = False
     _LEKTOR_SHUTDOWN = False
-    # client_max_size: limit żądania POST (upload) — domyślny 1 MB to za mało
+    # client_max_size: ciało żądania wczytywane do pamięci (request.read/post/json)
+    # — małe; wgrywanie czyta strumieniowo z własnym licznikiem (upload)
     app = web.Application(middlewares=[errlog, auth],
-                          client_max_size=512 * 1024 ** 2)
+                          client_max_size=LIMIT_CIALA_ZADANIA)
     app.on_response_prepare.append(_naglowki_bezpieczenstwa)   # CSP itd. (A3, C5)
+    global _PAMIEC
+    _PAMIEC = ObserwatorPamieci(k.prog_pamieci_mb)
     app.on_startup.append(_lektor_restore)        # NAJPIERW wczytaj kolejkę
     app.on_startup.append(_cleanup_parts)         # potem sprzątaj porzucone
+    app.on_startup.append(_pamiec_start)
+    app.on_cleanup.append(_pamiec_stop)
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)
     app.router.add_delete('/{path:.*}', delete_item)

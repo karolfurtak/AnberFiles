@@ -31,6 +31,7 @@ import os
 import secrets
 import time
 from collections import deque
+from urllib.parse import parse_qsl
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +45,7 @@ MIN_DLUGOSC_HASLA = 10
 LIMIT_PROB = 10                           # prób logowania na adres …
 OKNO_PROB_S = 60.0                        # … w oknie tylu sekund
 OPOZNIENIE_ZLE_HASLO = 1.0                # sekundy przed odpowiedzią na złe hasło
+LIMIT_FORMULARZA = 4096                   # bajtów ciała formularza logowania/ustawienia
 
 SCIEZKA_LOGOWANIA = '/__anberfiles/zaloguj'
 SCIEZKA_USTAWIENIA = '/__anberfiles/ustaw-haslo'
@@ -361,6 +363,34 @@ def _przekieruj(cel: str) -> web.Response:
     return web.Response(status=303, headers={'Location': cel, 'Cache-Control': 'no-store'})
 
 
+class FormularzZaDuzy(Exception):
+    """Ciało formularza przekracza LIMIT_FORMULARZA (odpowiedź 413)."""
+
+
+async def czytaj_formularz(request, limit: int = LIMIT_FORMULARZA) -> dict:
+    """Pola formularza (application/x-www-form-urlencoded) czytane z limitem
+    PRZED uwierzytelnieniem: Content-Length ponad limit → odmowa bez czytania;
+    bez Content-Length (chunked) czytanie urywa się po limicie + 1 bajt.
+    W pamięci nigdy więcej niż limit + jeden kawałek strumienia."""
+    dl = request.content_length
+    if dl is not None and dl > limit:
+        raise FormularzZaDuzy()
+    cialo = bytearray()
+    while True:
+        kawalek = await request.content.read(limit + 1 - len(cialo))
+        if not kawalek:
+            break
+        cialo += kawalek
+        if len(cialo) > limit:
+            raise FormularzZaDuzy()
+    return dict(parse_qsl(cialo.decode('utf-8', 'replace'), keep_blank_values=True))
+
+
+def _za_duzy() -> web.Response:
+    return web.Response(status=413, text=f'413 — formularz większy niż '
+                                         f'{LIMIT_FORMULARZA} bajtów.')
+
+
 async def _w_tle(funkcja, *arg):
     return await asyncio.get_running_loop().run_in_executor(None, funkcja, *arg)
 
@@ -390,7 +420,11 @@ async def obsluz(request, handler, katalog: Path, bramka: Bramka, instancja: str
         if not bramka.wolno(adres):
             bramka.rejestr('logowanie', f'limit prób przekroczony z {adres}', level='warn')
             return _strona_logowania(instancja, '/', 'Za dużo prób. Odczekaj minutę.', 429)
-        form = await request.post()
+        try:
+            form = await czytaj_formularz(request)
+        except FormularzZaDuzy:
+            bramka.rejestr('logowanie', f'za duży formularz logowania z {adres}', level='warn')
+            return _za_duzy()
         dalej = _bezpieczne_dalej(str(form.get('dalej', '/')))
         if await _w_tle(sprawdz_haslo, katalog, str(form.get('haslo', ''))):
             bramka.rejestr('logowanie', f'zalogowano urządzenie z {adres}')
@@ -421,7 +455,12 @@ async def _pierwsze_uruchomienie(request, katalog, bramka, instancja, adres):
     if request.path == SCIEZKA_USTAWIENIA and request.method == 'POST':
         if not bramka.wolno(adres):
             return _strona_ustawienia(instancja, 'Za dużo prób. Odczekaj minutę.', 429)
-        form = await request.post()
+        try:
+            form = await czytaj_formularz(request)
+        except FormularzZaDuzy:
+            bramka.rejestr('logowanie', f'za duży formularz ustawienia hasła z {adres}',
+                           level='warn')
+            return _za_duzy()
         haslo, powtorz = str(form.get('haslo', '')), str(form.get('powtorz', ''))
         if len(haslo) < MIN_DLUGOSC_HASLA:
             return _strona_ustawienia(

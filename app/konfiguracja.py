@@ -36,7 +36,8 @@ MODULY = ('podglad_docx', 'eksport_docx', 'lektor', 'lektor_opisy_ai',
 
 KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
-               'haslo_wymagane', 'tylko_odczyt', 'logowanie'),
+               'haslo_wymagane', 'tylko_odczyt', 'logowanie',
+               'limit_wgrywania_mb', 'prog_pamieci_mb'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -76,6 +77,8 @@ class Konfiguracja:
     moduly: dict = field(default_factory=dict)
     zrodlo: str = 'domyślne (Anbernic)'
     logowanie: str = 'basic'
+    limit_wgrywania_mb: int = 512        # łączny rozmiar jednego wgrywania (413 ponad)
+    prog_pamieci_mb: int = 400           # serwer + procesy potomne: ostrzeżenie w rejestrze
 
     @property
     def katalog_auth(self) -> Path:
@@ -117,6 +120,17 @@ def _port(zrodlo: str, tekst: str) -> int:
     if not 1 <= p <= 65535:
         raise BladKonfiguracji(f'{zrodlo}: port {p} poza zakresem 1–65535')
     return p
+
+
+def _dodatnia(klucz: str, tekst: str) -> int:
+    try:
+        v = int(str(tekst).strip())
+    except ValueError:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: wymagana liczba '
+                               'całkowita') from None
+    if v < 1:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {v}: wymagana liczba dodatnia')
+    return v
 
 
 def _czytaj_plik(sciezka: Path) -> dict:
@@ -202,6 +216,9 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         moduly={n: _bool('moduly', n, m.get(n, 'tak')) for n in MODULY},
         zrodlo=zrodlo,
         logowanie=logowanie,
+        limit_wgrywania_mb=_dodatnia('limit_wgrywania_mb',
+                                     s.get('limit_wgrywania_mb', '512')),
+        prog_pamieci_mb=_dodatnia('prog_pamieci_mb', s.get('prog_pamieci_mb', '400')),
     )
 
 

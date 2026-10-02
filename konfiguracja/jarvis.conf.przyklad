@@ -16,6 +16,8 @@ uzytkownik_www  = karol
 haslo_wymagane  = tak            ; przy logowanie = basic: pusty SERVER_PASS = serwer nie startuje
 logowanie       = formularz      ; basic = okno HTTP Basic (konsola) · formularz = strona logowania + zapamiętane urządzenie
 tylko_odczyt    = tak            ; wgrywanie, usuwanie, zmiana nazwy, nowy katalog → 403
+limit_wgrywania_mb = 512         ; łączny rozmiar jednego wgrywania plików (MB), ponad → 413
+prog_pamieci_mb = 400            ; serwer + procesy potomne (soffice, lektor): ostrzeżenie w rejestrze zdarzeń
 
 [katalogi]
 katalog_glowny   = /srv/anberfiles/korzen

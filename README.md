@@ -28,7 +28,7 @@ ale serwuje dowolne drzewo katalogów.
 
 **Upload drag & drop:**
 - upuszczenie plików na listing wgrywa je do bieżącego katalogu
-  (POST multipart, limit 512 MB, wiele plików naraz)
+  (POST multipart, limit 512 MB — `limit_wgrywania_mb`, wiele plików naraz)
 - duplikaty nazw dostają sufiks z timestampem — nic nie jest nadpisywane
 
 **Akcje przy pliku:**
@@ -110,6 +110,13 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
 - Hasło **tylko** w zmiennej `SERVER_PASS`, nigdy w pliku.
 - Przy starcie: brak hasła przy `haslo_wymagane = tak`, brak katalogu głównego albo
   nieudana próba zapisu w katalogu danych = komunikat na stderr i kod wyjścia 2.
+- Limity i pamięć (`[serwer]`): `limit_wgrywania_mb` (domyślnie 512) — łączny rozmiar
+  jednego wgrywania, ponad → 413 (licznik bajtów w trakcie strumienia, `.part` usuwany);
+  pozostałe ciała żądań czytane do pamięci najwyżej 64 KiB, formularz logowania 4 KiB
+  (sprawdzane przed wczytaniem). `prog_pamieci_mb` (domyślnie 400) — co 60 s pomiar RSS
+  serwera i jego procesów potomnych (soffice, lektor) z `/proc`; nowy szczyt (wzrost
+  o co najmniej 10 %) i przekroczenie progu (najwyżej raz na 10 min, poziom `warn`)
+  trafiają do rejestru zdarzeń; stan „Pamięć: teraz / szczyt / próg" w nagłówku `/?events=1`.
 - `tylko_odczyt = tak` → 403 na wgrywanie, usuwanie, zmianę nazwy, nowy katalog,
   kadrowanie i eksport DOCX; lektor i jego kolejka działają. Przyciski tych akcji
   znikają z interfejsu, podobnie przyciski wyłączonych modułów.
