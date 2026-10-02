@@ -59,6 +59,76 @@ def pozostalo_s(audio: Path, wiek_dni: int, teraz: float = None) -> float:
     return Path(audio).stat().st_mtime + wiek_dni * SEKUND_NA_DOBE - teraz
 
 
+_MP3_KBPS = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
+_MP3_HZ = (44100, 48000, 32000, 0)
+
+
+def czas_trwania_s(audio: Path):
+    """Czas trwania nagrania w sekundach z nagłówka pliku (WAV, FLAC, MP3
+    MPEG-1 warstwa III: Xing/Info albo stała przepływność); None = nie da się
+    ustalić. Czyta najwyżej kilka kB — lista „Do przesłuchania” liczy to przy
+    każdym wyświetleniu."""
+    audio = Path(audio)
+    ext = audio.suffix.lower()
+    try:
+        rozmiar = audio.stat().st_size
+        with open(audio, 'rb') as f:
+            glowa = f.read(16384)
+    except OSError:
+        return None
+    try:
+        if ext == '.wav':
+            import wave
+            with wave.open(str(audio), 'rb') as w:
+                return w.getnframes() / float(w.getframerate())
+        if ext == '.flac':
+            if glowa[:4] != b'fLaC':
+                return None
+            si = glowa[8:8 + 34]                       # STREAMINFO (pierwszy blok)
+            hz = (si[10] << 12) | (si[11] << 4) | (si[12] >> 4)
+            probki = ((si[13] & 0x0F) << 32) | int.from_bytes(si[14:18], 'big')
+            return probki / hz if hz and probki else None
+        if ext == '.mp3':
+            pocz = 0
+            if glowa[:3] == b'ID3':
+                pocz = 10 + ((glowa[6] & 0x7F) << 21 | (glowa[7] & 0x7F) << 14
+                             | (glowa[8] & 0x7F) << 7 | (glowa[9] & 0x7F))
+                with open(audio, 'rb') as f:
+                    f.seek(pocz)
+                    glowa = f.read(4096)
+            else:
+                glowa = glowa[:4096]
+            i = next((k for k in range(len(glowa) - 3)
+                      if glowa[k] == 0xFF and (glowa[k + 1] & 0xFE) == 0xFA), None)
+            if i is None:
+                return None
+            kbps = _MP3_KBPS[glowa[i + 2] >> 4]
+            hz = _MP3_HZ[(glowa[i + 2] >> 2) & 3]
+            if not kbps or not hz:
+                return None
+            mono = (glowa[i + 3] >> 6) == 3
+            x = i + 4 + (17 if mono else 32)           # nagłówek Xing/Info
+            if glowa[x:x + 4] in (b'Xing', b'Info') and glowa[x + 7] & 1:
+                ramki = int.from_bytes(glowa[x + 8:x + 12], 'big')
+                return ramki * 1152 / hz
+            return (rozmiar - pocz - i) * 8 / (kbps * 1000)
+    except (OSError, ValueError, IndexError, EOFError, Exception):
+        return None
+    return None
+
+
+def opis_czasu(sekundy) -> str:
+    """„12 min 30 s”, „45 s”, „1 h 05 min”."""
+    if sekundy is None:
+        return ''
+    s = int(round(sekundy))
+    if s >= 3600:
+        return f'{s // 3600} h {s % 3600 // 60:02d} min'
+    if s >= 60:
+        return f'{s // 60} min {s % 60:02d} s'
+    return f'{s} s'
+
+
 def opis_pozostalo(sekundy: float) -> str:
     """„2 dni 5 h”, „7 h”, „< 1 h” — do paska podglądu."""
     if sekundy == float('inf'):

@@ -4637,9 +4637,36 @@ def _prz_wiersze(notatki: list) -> list:
                  ostatnia=ost, odsluch=_PRZ_MAGAZYN.odsluch(n['sciezka']),
                  nieprzeniesiona=bool(zrodlo == 'decyzja' and ost['id'] > granica),
                  url='/' + quote(_rel_root(n['plik'])),
-                 nagranie=_lektor_audio_for(n['plik'], exports=True) is not None)
+                 nagranie_plik=_lektor_audio_for(n['plik'], exports=True))
+        w['nagranie'] = w['nagranie_plik'] is not None
         wynik.append(w)
     return wynik
+
+
+def _prz_stan_nagrania(w: dict, prog) -> dict:
+    """Stan nagrania lektora pozycji listy „Do przesłuchania” — tylko odczyt
+    katalogu lektora i kolejki, nic się nie generuje przy wyświetleniu.
+    rodzaj: gotowe | trwa | brak | blad."""
+    plik = Path(w['plik'])
+    job = _lektor_zadanie_pliku(plik.resolve()) if KONF.modul('lektor') else None
+    if job is not None:
+        napis, pct = _lektor_stan_tekst(job, prog)
+        return {'rodzaj': 'trwa', 'napis': napis, 'pct': pct, 'job': job['id']}
+    aud = w.get('nagranie_plik')
+    if aud is not None:
+        czas = _nagr.opis_czasu(_nagr.czas_trwania_s(aud))
+        try:
+            zostalo = _nagr.opis_pozostalo(_nagr.pozostalo_s(aud, KONF.wiek_nagran_dni))
+        except OSError:
+            zostalo = ''
+        return {'rodzaj': 'gotowe',
+                'napis': '🔊 gotowe' + (f' · {czas}' if czas else '')
+                         + (f' · zniknie za {zostalo}' if zostalo else '')}
+    rel = _rel_root(plik)
+    bl = next((b for b in reversed(_LEKTOR_BLEDY) if b.get('plik') == rel), None)
+    if bl is not None:
+        return {'rodzaj': 'blad', 'napis': f'⚠ błąd generowania: {bl["blad"]}'[:160]}
+    return {'rodzaj': 'brak', 'napis': '○ brak nagrania'}
 
 
 def _prz_licznik(wiersze: list) -> dict:
@@ -4683,7 +4710,8 @@ async def przesluchania_get(request):
     z = request.query.get('z') or _PRZ_MAGAZYN.ui('zakladka', 'decyzja')
     if z not in _prz.ZAKLADKI:
         z = 'decyzja'
-    return web.Response(text=render_przesluchania_page(wiersze, z),
+    tylko = bool(_PRZ_MAGAZYN.ui('tylko_nagrane', False))
+    return web.Response(text=render_przesluchania_page(wiersze, z, tylko),
                         content_type='text/html', headers={'Cache-Control': 'no-store'})
 
 
@@ -4705,6 +4733,12 @@ async def przesluchania_post(request):
     co = request.query.get('przesluchania', '')
     d = await _prz_json(request)
     try:
+        if co == 'ui' and 'tylko_nagrane' in d:
+            t = d.get('tylko_nagrane')
+            if not isinstance(t, bool):
+                return web.Response(status=400, text='Pole „tylko_nagrane” musi być true/false.')
+            _PRZ_MAGAZYN.ustaw_ui('tylko_nagrane', t)
+            return web.json_response({'tylko_nagrane': t})
         if co == 'ui':
             z = d.get('zakladka')
             if z not in _prz.ZAKLADKI:
@@ -4791,9 +4825,17 @@ PRZ_STYLE = (
     '.tabs button.on{background:#1a5fb4;border-color:#1a5fb4;color:#fff}'
     '.lst{max-width:820px;margin:0 auto;padding:.6em .8em 4em}'
     '.prj{color:#8a93a0;font-size:.85em;margin:1.2em .2em .4em;text-transform:none}'
-    'a.row{display:block;background:#1d2027;border:1px solid #2a2f38;border-radius:10px;'
-    'padding:.7em .9em;margin:.45em 0;color:#e8e9ec;text-decoration:none;min-height:44px}'
-    'a.row:active,a.row:hover{background:#262a33}'
+    '.row{display:block;background:#1d2027;border:1px solid #2a2f38;border-radius:10px;'
+    'padding:.7em .9em;margin:.45em 0;color:#e8e9ec;min-height:44px}'
+    '.row:hover{background:#262a33}'
+    'a.lnk{display:block;color:#e8e9ec;text-decoration:none}'
+    '.lek{display:flex;gap:.6em;align-items:center;flex-wrap:wrap;margin-top:.45em;'
+    'font-size:.85em}'
+    '.lek.gotowe{color:#6fce8f}.lek.trwa{color:#e2b340}.lek.brak{color:#8a93a0}'
+    '.lek.blad{color:#ff8a80}.lek progress{width:8em}'
+    '.lek button.gen{font:inherit;color:#7ab7ff;background:#232731;border:1px solid #343a45;'
+    'border-radius:6px;padding:.3em .8em;min-height:36px;cursor:pointer}'
+    '#tnagr.on{background:#1a5fb4;color:#fff;border-color:#1a5fb4}'
     '.tt{font-size:1.02em;line-height:1.35}'
     '.mt{color:#9aa0ab;font-size:.8em;margin-top:.3em;display:flex;gap:.6em;flex-wrap:wrap}'
     '.st{border-radius:5px;padding:0 .4em;background:#2b3240;color:#cfe3ff}'
@@ -4803,12 +4845,48 @@ PRZ_STYLE = (
 )
 
 
-def render_przesluchania_page(wiersze: list, zakladka: str) -> str:
+# Lista „Do przesłuchania”: 🔊 generuj (wybór formatu i głosu jak w podglądzie)
+# i śledzenie zadań w toku co 3 s; koniec zadania → przeładowanie (🔊 gotowe).
+PRZ_LEKTOR_JS = (
+    '<script>' + JS_ESC + JS_ZAPIS + LEKTOR_WYBOR_JS + '(function(){'
+    'function stan(el,t,p){el.querySelector(".lst-st").textContent=t;'
+    'let pb=el.querySelector("progress");'
+    'if(p==null){if(pb)pb.remove();return;}'
+    'if(!pb){pb=document.createElement("progress");pb.max=100;el.appendChild(pb);}pb.value=p;}'
+    'let sledz=false;'
+    'async function petla(){if(sledz)return;sledz=true;for(;;){'
+    'await new Promise(r=>setTimeout(r,3000));let d;'
+    'try{d=await(await fetch("/?lektorqj=1",{cache:"no-store"})).json();}catch(e){continue;}'
+    'const el=[...document.querySelectorAll(".lek[data-job]")];if(!el.length)return;'
+    'for(const e of el){const j=(d.jobs||[]).find(x=>x.id===+e.dataset.job);'
+    'if(!j){location.reload();return;}'
+    'if(j.state==="running"){const p=j.pct||0;stan(e,"🔊 "+(j.chunk&&!/^0\\/0$/.test(j.chunk)'
+    '?"część "+j.chunk+" · ":"")+p+"%",p);}'
+    'else stan(e,j.state==="paused"?"⏸ wstrzymane":"⏳ w kolejce",null);}}}'
+    'document.querySelectorAll(".lek button.gen").forEach(b=>b.onclick=async ev=>{'
+    'ev.preventDefault();const fm=await pickFmt(b.dataset.n);if(fm===null)return;'
+    'const el=b.closest(".lek");b.disabled=true;'
+    'const u=b.dataset.u+"?lektor=1&queue=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
+    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
+    'try{const r=await afFetch(u,{method:"POST"});const j=await r.json().catch(()=>({}));'
+    'if((r.status===202||j.status==="duplikat")&&j.id!=null){el.dataset.job=j.id;'
+    'el.className="lek trwa";b.remove();stan(el,"⏳ w kolejce",null);petla();}'
+    'else{stan(el,"⚠ "+(j.blad||j.status||("HTTP "+r.status)),null);b.disabled=false;}}'
+    'catch(e){stan(el,"⚠ brak połączenia",null);b.disabled=false;}});'
+    'if(document.querySelector(".lek[data-job]"))petla();'
+    '})();</script>'
+)
+
+
+def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool = False) -> str:
     lic = _prz_licznik(wiersze)
+    lektor_on = KONF.modul('lektor')
+    prog = _lektor_progress()
     tabs = ''.join(
         f'<button data-z="{z}" class="{"on" if z == zakladka else ""}">'
         f'{_esc(_prz.NAZWY_ZAKLADEK[z])} ({lic[z]})</button>' for z in _prz.ZAKLADKI)
-    pokaz = sorted((w for w in wiersze if w['zakladka'] == zakladka),
+    pokaz = sorted((w for w in wiersze if w['zakladka'] == zakladka
+                    and (not tylko_nagrane or w['nagranie'])),
                    key=lambda w: (w['projekt'].lower(), -w['mtime']))
     czesci, projekt = [], None
     for w in pokaz:
@@ -4821,16 +4899,29 @@ def render_przesluchania_page(wiersze: list, zakladka: str) -> str:
         if w['rodzaj']:
             znaczniki.append(_esc(w['rodzaj']))
         znaczniki.append(datetime.fromtimestamp(w['mtime']).strftime('%d.%m.%Y'))
-        if w['nagranie']:
-            znaczniki.append('🔊 nagranie')
         if w['odsluch'].get('odsluchane'):
             znaczniki.append('🎧 odsłuchane')
         if w['nieprzeniesiona']:
             znaczniki.append('⏳ czeka na przeniesienie do vaulta')
+        # 02.10 (Karol: „muszę widzieć, które dokumenty mają gotowe pliki do
+        # odsłuchu"): stan nagrania przy każdej pozycji + generowanie z listy
+        lek = ''
+        if lektor_on:
+            sn = _prz_stan_nagrania(w, prog)
+            lek = (f'<div class="lek {sn["rodzaj"]}" data-p="{_esc(_rel_root(w["plik"]))}"'
+                   + (f' data-job="{sn["job"]}"' if sn.get('job') else '') + '>'
+                   f'<span class="lst-st">{_esc(sn["napis"])}</span>'
+                   + (f'<progress max="100" value="{sn["pct"]}"></progress>'
+                      if sn.get('pct') is not None else '')
+                   + (f'<button class="gen" data-u="{w["url"]}" '
+                      f'data-n="{_esc(Path(w["plik"]).name)}">🔊 generuj</button>'
+                      if sn['rodzaj'] in ('brak', 'blad') else '')
+                   + '</div>')
         czesci.append(
-            f'<a class="row" href="{w["url"]}?sluchaj=1"><div class="tt">{_esc(w["tytul"])}'
+            f'<div class="row"><a class="lnk" href="{w["url"]}?sluchaj=1">'
+            f'<div class="tt">{_esc(w["tytul"])}'
             f'</div><div class="mt">{"".join(f"<span>{z}</span>" for z in znaczniki)}'
-            '</div></a>')
+            f'</div></a>{lek}</div>')
     tresc = ''.join(czesci) or (
         f'<div class="pusto">Brak notatek w zakładce „{_esc(_prz.NAZWY_ZAKLADEK[zakladka])}”.'
         '</div>')
@@ -4842,7 +4933,12 @@ def render_przesluchania_page(wiersze: list, zakladka: str) -> str:
         f'<div class="hd"><div class="bar">{_link_startowy()}'
         '<a href="/">📁 pliki</a>'
         '<a href="/?przesluchania=1&odswiez=1" title="Wczytaj vault od nowa">🔄</a>'
-        f'<span style="font-weight:600">Do przesłuchania</span></div>'
+        f'<span style="font-weight:600">Do przesłuchania</span>'
+        + (f'<button id="tnagr" class="{"on" if tylko_nagrane else ""}" '
+           'title="Pokaż tylko pozycje z gotowym nagraniem lektora">'
+           + ('☑' if tylko_nagrane else '☐') + ' tylko z nagraniem</button>'
+           if lektor_on else '') +
+        '</div>'
         f'<div class="tabs">{tabs}</div></div>'
         f'<div class="lst">{tresc}'
         f'<div class="stopka">Decyzje nieprzeniesione do vaulta: {nieprz} · '
@@ -4853,7 +4949,13 @@ def render_przesluchania_page(wiersze: list, zakladka: str) -> str:
         'try{await afFetch("/?przesluchania=ui",{method:"POST",'
         'headers:{"Content-Type":"application/json"},body:JSON.stringify({zakladka:z})});}'
         'catch(e){}location.href="/?przesluchania=1&z="+z;});'
-        '})();</script>')
+        'const tn=document.getElementById("tnagr");if(tn)tn.onclick=async()=>{'
+        'try{await afFetch("/?przesluchania=ui",{method:"POST",'
+        'headers:{"Content-Type":"application/json"},'
+        'body:JSON.stringify({tylko_nagrane:!tn.classList.contains("on")})});}'
+        'catch(e){}location.reload();};'
+        '})();</script>'
+        + (PRZ_LEKTOR_JS if lektor_on else ''))
 
 
 def _zdania_lektora(cues_path: Path):

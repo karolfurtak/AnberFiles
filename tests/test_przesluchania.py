@@ -303,7 +303,7 @@ def test_widok_sluchaj_z_nagraniem_podswietla_i_wznawia_pozycje(tmp_path, auth):
     assert '<span class=s data-i="1"' in html and 'Akapit &lt;b&gt;.' in html
     assert 'const P=60.0' in html                       # wznowienie od zapisanej pozycji
     assert 'id="lekdel"' in html                        # 🗑 nagranie w widoku
-    assert '🎧 odsłuchane' in lista and '🔊 nagranie' in lista
+    assert '🎧 odsłuchane' in lista and '🔊 gotowe' in lista
 
 
 def test_zakladka_zapamietana_na_serwerze(tmp_path, auth):
@@ -421,3 +421,90 @@ def test_widok_sluchania_po_odswiezeniu_pokazuje_postep(tmp_path, auth, monkeypa
             server._LEKTOR_QUEUE.clear()
     html = uruchom(k, sc)
     assert 'data-job="5"' in html and 'value="55"' in html and 'część 2/4 · 55%' in html
+
+
+# ── stan nagrania przy pozycjach listy (Karol 02.10: „tu muszę też widzieć,
+# które dokumenty mają już gotowe pliki do odsłuchu”) ──────────────────────
+
+def _mp3_cbr(plik, ramek=100):
+    """MP3 MPEG-1 warstwa III 128 kb/s 44,1 kHz bez nagłówka Xing: 417 B na ramkę."""
+    ramka = bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)
+    plik.write_bytes(b'ID3\x04\x00\x00\x00\x00\x00\x00' + ramka * ramek)
+
+
+def test_lista_pokazuje_stan_nagrania_kazdej_pozycji(tmp_path, auth, monkeypatch):
+    import server
+    k, v = _konf(tmp_path, wiek_nagran_dni='3')
+    (v / 'Zasoby' / 'MoCap' / 'druga.md').write_text(
+        '---\nstatus: do-akceptacji\n---\n# Druga notatka\n', encoding='utf-8')
+    kl = tmp_path / 'srv' / 'korzen' / 'lektor' / 'vault' / 'Zasoby' / 'MoCap'
+    kl.mkdir(parents=True)
+    _mp3_cbr(kl / 'plan-kamer_lektor.mp3')
+    monkeypatch.setattr(server, '_lektor_progress',
+                        lambda: {'pct': 30, 'chunk': 3, 'chunks': 10, 'out': 'x'})
+    koncepcja = (v / 'Zasoby' / 'Rhino' / 'koncepcja.md').resolve()
+
+    async def sc(cl):
+        server._LEKTOR_QUEUE.append({
+            'id': 9, 'out': str(tmp_path / 'x_lektor.mp3'), 'src': str(koncepcja),
+            'plik': str(koncepcja), 'fmt': 'mp3', 'state': 'running', 'cancelled': False,
+            'proc': None, 'started': 0})
+        server._LEKTOR_BLEDY.append({'id': 3, 'out': 'druga_lektor.mp3',
+                                     'src': 'vault/Zasoby/MoCap/druga.md',
+                                     'plik': 'vault/Zasoby/MoCap/druga.md', 'state': 'failed',
+                                     'blad': 'Piper nie odpowiada', 'czas': ''})
+        try:
+            return await _lista(cl, auth)
+        finally:
+            server._LEKTOR_QUEUE.clear()
+            server._LEKTOR_BLEDY.clear()
+    html = uruchom(k, sc)
+
+    def wiersz(rel):
+        i = html.index(f'data-p="{rel}"')
+        return html[i:html.index('</div>', i)]
+    gotowe = wiersz('vault/Zasoby/MoCap/plan-kamer.md')
+    assert 'class="lek gotowe"' in html and '🔊 gotowe · 3 s · zniknie za 2 dni 23 h' in gotowe
+    trwa = wiersz('vault/Zasoby/Rhino/koncepcja.md')
+    assert 'data-job="9"' in trwa and 'część 3/10 · 30%' in trwa and 'value="30"' in trwa
+    blad = wiersz('vault/Zasoby/MoCap/druga.md')
+    assert '⚠ błąd generowania: Piper nie odpowiada' in blad and 'class="gen"' in blad
+    brak = wiersz('vault/Zasoby/MoCap/zlosliwa.md')
+    assert '○ brak nagrania' in brak and '🔊 generuj' in brak
+    assert 'class="gen"' not in gotowe and 'class="gen"' not in trwa
+    # wyświetlenie listy niczego nie generuje
+    assert not (kl / 'druga_lektor.mp3').exists()
+
+
+def test_filtr_tylko_z_nagraniem_zapamietany_na_serwerze(tmp_path, auth):
+    k, v = _konf(tmp_path)
+    kl = tmp_path / 'srv' / 'korzen' / 'lektor' / 'vault' / 'Zasoby' / 'MoCap'
+    kl.mkdir(parents=True)
+    _mp3_cbr(kl / 'plan-kamer_lektor.mp3')
+
+    async def sc(cl):
+        wszystkie = await _lista(cl, auth)
+        r = await cl.post('/?przesluchania=ui', auth=auth, json={'tylko_nagrane': True})
+        tylko = await _lista(cl, auth)                 # po F5 / innym urządzeniu
+        zly = await cl.post('/?przesluchania=ui', auth=auth, json={'tylko_nagrane': 'tak'})
+        return wszystkie, r.status, tylko, zly.status
+    wszystkie, st, tylko, zly = uruchom(k, sc)
+    assert 'koncepcja.md' in wszystkie and st == 200 and zly == 400
+    assert 'plan-kamer.md' in tylko and 'koncepcja.md' not in tylko
+    assert 'id="tnagr" class="on"' in tylko
+
+
+def test_czas_trwania_nagran_z_naglowka(tmp_path):
+    import wave
+    import nagrania
+    _mp3_cbr(tmp_path / 'a.mp3')
+    assert abs(nagrania.czas_trwania_s(tmp_path / 'a.mp3') - 100 * 417 * 8 / 128000) < 0.01
+    with wave.open(str(tmp_path / 'b.wav'), 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(22050)
+        w.writeframes(bytes(2 * 22050 * 3))
+    assert abs(nagrania.czas_trwania_s(tmp_path / 'b.wav') - 3.0) < 0.01
+    (tmp_path / 'c.mp3').write_bytes(b'ID3' + bytes(64))       # bez ramek
+    assert nagrania.czas_trwania_s(tmp_path / 'c.mp3') is None
+    assert nagrania.opis_czasu(754) == '12 min 34 s' and nagrania.opis_czasu(None) == ''
