@@ -85,8 +85,16 @@ def wczytaj(conf: Path, haslo: str = HASLO):
     return konfiguracja.wczytaj(conf, env={'SERVER_PASS': haslo})
 
 
-def uruchom(k, scenariusz):
+# Nagłówek, który dokładają skrypty stron do żądań zmieniających stan (B9);
+# klient testowy wysyła go domyślnie, bo testy symulują stronę AnberFiles.
+NAGLOWEK_STRONY = {'X-AnberFiles': '1'}
+
+
+def uruchom(k, scenariusz, naglowek: bool = True):
     """Serwer z ustawieniami k w pętli testowej; scenariusz(klient) → wynik.
+
+    naglowek=True: klient dokłada do KAŻDEGO żądania X-AnberFiles: 1 (jak
+    skrypty stron); False — klient „obcej strony" bez nagłówka.
 
     Nagłówki X-Test-Remote i X-Test-Scheme w żądaniu testowym podstawiają
     request.remote (adres klienta) i schemat (http/https) — pośrednik
@@ -108,7 +116,8 @@ def uruchom(k, scenariusz):
     async def _run():
         app = server.utworz_aplikacje(k)
         app.middlewares.insert(0, podstaw_adres)
-        async with TestClient(TestServer(app)) as cl:
+        async with TestClient(TestServer(app),
+                              headers=NAGLOWEK_STRONY if naglowek else None) as cl:
             return await scenariusz(cl)
     return asyncio.run(_run())
 

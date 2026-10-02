@@ -62,11 +62,17 @@ jobs:
           Z=$(curl -s -o /dev/null -w '%{http_code}' -b "$RUNNER_TEMP/c.txt" $U/)
           BEZ=$(curl -s -o /dev/null -w '%{http_code}' $U/)
           ZLE=$(curl -s -o /dev/null -w '%{http_code}' --data-urlencode "haslo=zle-haslo-000" $U/__anberfiles/zaloguj)
+          # B9: obca nazwa w Host → 421; POST zmieniający stan bez X-AnberFiles → 403, z nim → 200
+          OBCY=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' -b "$RUNNER_TEMP/c.txt" $U/)
+          BEZNAG=$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "$RUNNER_TEMP/c.txt" "$U/?lektorqresume=1")
+          ZNAG=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-AnberFiles: 1' -b "$RUNNER_TEMP/c.txt" "$U/?lektorqresume=1")
           kill $PID; cat "$RUNNER_TEMP/serwer.log"
           echo "bez tokenu: $BEZTOK, 1 MB: $DUZY, ustawienie z tokenem: $UST, z ciasteczkiem: $Z, bez: $BEZ, złe hasło: $ZLE"
+          echo "obcy Host: $OBCY, POST bez nagłówka: $BEZNAG, z nagłówkiem: $ZNAG"
           ls -l "$RUNNER_TEMP/anberfiles/dane/auth"
           test "$BEZTOK" = 403 && test "$DUZY" = 413
           test "$UST" = 303 && test "$Z" = 200 && test "$BEZ" = 401 && test "$ZLE" = 401
+          test "$OBCY" = 421 && test "$BEZNAG" = 403 && test "$ZNAG" = 200
           ! grep -rq "$H" "$RUNNER_TEMP/anberfiles/dane"
       - name: Odmowa startu bez hasła (logowanie basic)
         if: matrix.instancja == 'jarvis'

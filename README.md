@@ -112,7 +112,7 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   podglądu DOCX, katalog ZIP, favikona, kosz), `[moduly]` (`podglad_docx`,
   `eksport_docx`, `lektor`, `lektor_opisy_ai`, `wylaczanie`, `druk`, `bateria`,
   `kadrowanie` — `tak`/`nie`).
-- Eksport DOCX (`?docx=1` na `.md`): skrypt wyłącznie z `katalog_eksportu` — domyślnie
+- Eksport DOCX (POST `?docx=1` na `.md`, przycisk w podglądzie): skrypt wyłącznie z `katalog_eksportu` — domyślnie
   `export_to_docx.py`; dyrektywa `<!-- eksporter: X -->` w dokumencie albo
   `<projekt>/szablon/eksporter.conf` wybiera tylko NAZWĘ z białej listy plików
   `export_*.py` w katalogu eksportu (`X` → `export_X.py`). Ścieżka, `/`, `\`, `..`
@@ -133,6 +133,19 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
 - `tylko_odczyt = tak` → 403 na wgrywanie, usuwanie, zmianę nazwy, nowy katalog,
   kadrowanie i eksport DOCX; lektor i jego kolejka działają. Przyciski tych akcji
   znikają z interfejsu, podobnie przyciski wyłączonych modułów.
+- Ochrona przed żądaniami z obcych stron (DNS rebinding, CSRF):
+  - nagłówek `Host` musi być adresem IP (v4/v6, z portem lub bez), `localhost`, nazwą
+    `*.local` albo nazwą z `dozwolone_hosty` (`[serwer]`, lista po przecinku; wpis
+    z kropką na początku = sufiks, np. `.ts.net`) — inaczej 421;
+  - POST, PUT, PATCH i DELETE (wgrywanie, usuwanie, zmiana nazwy, kolejka lektora,
+    druk, wyłączanie, eksport DOCX) wymagają nagłówka `X-AnberFiles: 1`, który dokładają
+    skrypty stron (jedna funkcja `afFetch`/`afXhr`) — bez niego 403. Formularz z obcej
+    strony nie doda nagłówka, a `fetch` z obcego originu z własnym nagłówkiem wymaga
+    zgody CORS, której serwer nie daje. Skrypty i narzędzia wołające API (curl) muszą
+    dodać `-H 'X-AnberFiles: 1'`;
+  - formularze logowania i „Ustaw hasło" (zwykły formularz HTML, działa bez JS
+    i z menedżerem haseł) zamiast nagłówka sprawdzają `Origin`: obecny musi wskazywać
+    ten sam host:port co `Host`, inaczej 403.
 - `katalog_lektora` (musi leżeć w katalogu głównym): nagrania trafiają do
   `katalog_lektora/<ścieżka katalogu źródła>/<nazwa>_lektor.<fmt>` zamiast obok
   dokumentu; podgląd `.md`, `?read` i ikona 🎧 w listingu je odnajdują.
@@ -180,6 +193,12 @@ After=network-online.target
 EnvironmentFile=/etc/sprawozdania-server.env
 ExecStart=/usr/bin/python3 /usr/local/bin/sprawozdania-server.py
 Restart=on-failure
+# Zalecane: dedykowany użytkownik zamiast root (np. useradd -r -s /usr/sbin/nologin
+# anberfiles; prawa zapisu do katalogu głównego i katalogu danych). Uwaga: moduł
+# „wylaczanie" (wyłączenie konsoli po kolejce lektora) wymaga wtedy uprawnienia
+# do poweroff (np. reguła polkit albo sudoers dla tego jednego polecenia).
+#User=anberfiles
+#Group=anberfiles
 
 [Install]
 WantedBy=multi-user.target

@@ -75,7 +75,7 @@ def test_tylko_odczyt_odrzuca_zapis(tmp_path, auth, kadrowanie):
         st['kadrowanie'] = (await cl.post('/vault/proj/obraz.png?crop', auth=auth,
                                           json={'x': 0, 'y': 0, 'w': 5, 'h': 5,
                                                 'mode': 'overwrite'})).status
-        st['eksport_docx'] = (await cl.get('/vault/proj/a.md?docx=1', auth=auth)).status
+        st['eksport_docx'] = (await cl.post('/vault/proj/a.md?docx=1', auth=auth)).status
         return st
     st = uruchom(k, sc)
     assert st == {n: 403 for n in st}, st

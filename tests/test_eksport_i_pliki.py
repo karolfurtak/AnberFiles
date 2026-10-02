@@ -55,7 +55,7 @@ def _projekt(tmp_path, naglowek: str = ''):
 
 def _eksport(k):
     async def sc(cl):
-        r = await cl.get('/projekty/p1/processed/doc.md?docx=1', auth=AU)
+        r = await cl.post('/projekty/p1/processed/doc.md?docx=1', auth=AU)
         return r.status, await r.read()
     return uruchom(k, sc)
 

@@ -30,6 +30,10 @@ ustaw_haslo_bez_tokenu =
 limit_wgrywania_mb = 512        ; łączny rozmiar jednego wgrywania plików (MB), ponad → 413
 limit_zip_mb    = 2048           ; łączny rozmiar plików folderu pobieranego jako ZIP (MB), ponad → 413
 prog_pamieci_mb = 400            ; serwer + procesy potomne (soffice, lektor): ostrzeżenie w rejestrze zdarzeń
+# Ochrona przed DNS rebinding: serwer przyjmuje w adresie (nagłówek Host) tylko adres IP,
+# localhost, nazwy *.local i nazwy z tej listy (po przecinku lub spacji); inne → 421.
+# Wpis z kropką na początku = sufiks, np. .ts.net (nazwy MagicDNS Tailscale).
+dozwolone_hosty =
 
 [katalogi]
 katalog_glowny   = /srv/anberfiles/korzen

@@ -62,6 +62,18 @@ def _json_do_script(obj) -> str:
 JS_ESC = ("function esc(s){return String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;',"
           "'<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));}")
 
+# B9: żądania zmieniające stan (POST/PUT/PATCH/DELETE) muszą nieść nagłówek
+# X-AnberFiles: 1 (straz_zrodla). Formularz z obcej strony go nie doda, a fetch
+# z obcego originu z własnym nagłówkiem wymaga zgody CORS, której serwer nie
+# daje. JEDNA definicja JS: afFetch(u,o) = fetch z nagłówkiem, afXhr(x) =
+# nagłówek dla XMLHttpRequest (po open). Wklejana do każdego skryptu, który
+# zapisuje; test pilnuje, że w kodzie stron nie ma gołego fetch z POST/DELETE.
+NAGLOWEK_ZAPISU = 'X-AnberFiles'
+JS_ZAPIS = ("function afFetch(u,o){o=Object.assign({},o||{});"
+            "o.headers=Object.assign({'X-AnberFiles':'1'},o.headers||{});"
+            "return fetch(u,o);}"
+            "function afXhr(x){x.setRequestHeader('X-AnberFiles','1');return x;}")
+
 # Obce źródła skryptów dopuszczone w CSP: MathJax (wzory w podglądzie .md)
 # i Three.js (podgląd modeli 3D). Dane (connect-src, img-src) — wyłącznie własny
 # origin, więc wstrzyknięty skrypt nie wyśle treści vaulta na zewnątrz fetch-em
@@ -1363,7 +1375,7 @@ def render_md_page(target: Path) -> str:
         'r.addEventListener("wheel",e=>{if(!(e.ctrlKey||e.metaKey))return;'
         'e.preventDefault();step(e.deltaY<0?0.1:-0.1);},{passive:false});'
         'ap();})();</script>'
-        '<script>(function(){'
+        '<script>' + JS_ZAPIS + '(function(){'
         'const r=document.getElementById("rendered"),'
         'w=document.getElementById("raw"),'
         'br=document.getElementById("bren"),bw=document.getElementById("braw");'
@@ -1386,7 +1398,7 @@ def render_md_page(target: Path) -> str:
         '(md→DOCX→PDF jak przy sprawozdaniach; ok. 1–2 min; '
         'drukarka musi być w sieci domowej)"))return;'
         'a.textContent="⏳...";'
-        'try{const r=await fetch(a.dataset.n+"?print=1",{method:"POST"});'
+        'try{const r=await afFetch(a.dataset.n+"?print=1",{method:"POST"});'
         'a.textContent=r.status===202?"🖨 wysłano":"🖨 błąd";}'
         'catch(err){a.textContent="🖨 błąd";}'
         'setTimeout(()=>a.textContent="🖨 drukuj",4000);};'
@@ -1405,7 +1417,7 @@ def render_md_page(target: Path) -> str:
         'const pct=Math.max(2,Math.min(99,p.pct||0));'
         'bar.style.width=pct+"%";txt.textContent="⚙ DOCX "+pct+"%";'
         '}catch(_){}await new Promise(r=>setTimeout(r,400));}})();'
-        'try{const r=await fetch(dxb.getAttribute("href"));stop=true;'
+        'try{const r=await afFetch(dxb.getAttribute("href"),{method:"POST"});stop=true;'
         'if(!r.ok)throw new Error("HTTP "+r.status);'
         'const blob=await r.blob();bar.style.width="100%";'
         'txt.textContent="✓ DOCX gotowy — pobieranie";'
@@ -1612,7 +1624,7 @@ LEKTOR_WYBOR_JS = (
 # Akcje plikowe: 🗑 usuń (→.kosz), ✎ zmień nazwę (prompt → POST ?rename=),
 # ⧉ kopiuj nazwę do schowka, 🔊 lektor (okno wyboru: LEKTOR_WYBOR_JS).
 DEL_JS = (
-    '<script>' + JS_ESC + LEKTOR_WYBOR_JS +
+    '<script>' + JS_ESC + JS_ZAPIS + LEKTOR_WYBOR_JS +
     'document.addEventListener("click",async e=>{'
     'const a=e.target.closest("a.del,a.ren,a.cpy,a.lek");if(!a)return;'
     'e.preventDefault();'
@@ -1624,7 +1636,7 @@ DEL_JS = (
     'try{'
     'let u=a.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
     '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
-    'let r=await fetch(u,{method:"POST"});'
+    'let r=await afFetch(u,{method:"POST"});'
     'let j=await r.json().catch(()=>({}));'
     'if(j.status==="busy"){'
     'a.textContent="🔊";'
@@ -1633,7 +1645,7 @@ DEL_JS = (
     '+j.pending+" plik(ów).":"")+"\\n\\nDopisać ten plik do kolejki? '
     'Audio wygeneruje się automatycznie, gdy przyjdzie jego kolej."))return;'
     'a.textContent="⏳";'
-    'r=await fetch(u+"&queue=1",{method:"POST"});'
+    'r=await afFetch(u+"&queue=1",{method:"POST"});'
     'j=await r.json().catch(()=>({}));}'
     'if(r.status===202){'
     'a.title=(j.status==="queued"?"W kolejce (poz. "+j.position+"): "'
@@ -1657,13 +1669,13 @@ DEL_JS = (
     'if(a.classList.contains("ren")){'
     'const nn=prompt("Nowa nazwa:",n);'
     'if(!nn||nn===n)return;'
-    'try{const r=await fetch(a.dataset.n+"?rename="+encodeURIComponent(nn),'
+    'try{const r=await afFetch(a.dataset.n+"?rename="+encodeURIComponent(nn),'
     '{method:"POST"});'
     'if(r.ok){location.reload();}'
     'else{alert("Błąd zmiany nazwy: "+await r.text());}'
     '}catch(err){alert("Błąd zmiany nazwy");}return;}'
     'if(!confirm("Usunąć \\""+n+"\\"?\\n(plik trafi do kosza .kosz)"))return;'
-    'try{const r=await fetch(a.dataset.n,{method:"DELETE"});'
+    'try{const r=await afFetch(a.dataset.n,{method:"DELETE"});'
     'if(r.ok){a.closest("tr").remove();}'
     'else{alert("Błąd usuwania: HTTP "+r.status);}'
     '}catch(err){alert("Błąd usuwania");}'
@@ -1675,7 +1687,7 @@ DEL_JS = (
 # strony (pojawia się odtwarzacz). Działa także w trybie tylko do odczytu —
 # nagranie trafia wtedy do katalogu lektora instancji.
 LEKTOR_PODGLAD_JS = (
-    '<script>' + JS_ESC + LEKTOR_WYBOR_JS +
+    '<script>' + JS_ESC + JS_ZAPIS + LEKTOR_WYBOR_JS +
     '(function(){'
     'const b=document.getElementById("lekgen");if(!b)return;'
     'const st=document.getElementById("lekst"),lab=b.textContent;'
@@ -1694,12 +1706,12 @@ LEKTOR_PODGLAD_JS = (
     'b.dataset.busy="1";b.textContent="⏳";'
     'try{const u=b.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
     '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
-    'let r=await fetch(u,{method:"POST"});let j=await r.json().catch(()=>({}));'
+    'let r=await afFetch(u,{method:"POST"});let j=await r.json().catch(()=>({}));'
     'if(j.status==="busy"){'
     'if(!confirm("Lektor jest teraz zajęty — czyta inny dokument."'
     '+(j.pending?"\\nW kolejce czeka: "+j.pending+" plik(ów).":"")'
     '+"\\n\\nDopisać ten dokument do kolejki?")){koniec("");return;}'
-    'r=await fetch(u+"&queue=1",{method:"POST"});j=await r.json().catch(()=>({}));}'
+    'r=await afFetch(u+"&queue=1",{method:"POST"});j=await r.json().catch(()=>({}));}'
     'if(r.status===202||j.status==="duplikat"){'
     'st.textContent=j.status==="queued"?"⏳ w kolejce":"🔊 0%";'
     'sledz(j.id!=null?j.id:null,j.out);}'
@@ -1729,7 +1741,7 @@ def _lektor_przycisk(target: Path, aud) -> str:
 # Drag & drop upload — upuszczenie plików na listing wgrywa je do bieżącego
 # katalogu (POST multipart); tabela odświeży się sama (auto-refresh).
 DROP_JS = (
-    '<script>(function(){'
+    '<script>' + JS_ZAPIS + '(function(){'
     'const ov=document.createElement("div");ov.id="dropov";'
     'ov.textContent="⬆ Upuść pliki, aby wgrać do tego katalogu";'
     'document.body.appendChild(ov);let d=0;'
@@ -1763,7 +1775,7 @@ DROP_JS = (
     # PLIK-PO-PLIKU: zerwanie gubi 1 plik (retry x3), nie cala paczke 93+video
     'function send1(f,rel){return new Promise(res=>{'
     'const fd=new FormData();fd.append("file",f,rel);'
-    'const xhr=new XMLHttpRequest();xhr.open("POST",location.pathname);'
+    'const xhr=new XMLHttpRequest();xhr.open("POST",location.pathname);afXhr(xhr);'
     'xhr.timeout=600000;'
     'xhr.upload.onprogress=ev=>{if(ev.lengthComputable){'
     'pbar.style.width=Math.round((proc+ev.loaded/ev.total)/tot*100)+"%";}};'
@@ -1840,14 +1852,14 @@ VIEWER_STYLE = (
 
 # Nowy folder: prompt o nazwę → POST ?mkdir=nazwa do bieżącego katalogu → reload.
 MKDIR_JS = (
-    '<script>'
+    '<script>' + JS_ZAPIS +
     'var _mkd=document.getElementById("mkd");'
     'if(_mkd)_mkd.addEventListener("click",async function(e){'
     'e.preventDefault();'
     'var n=(prompt("Nazwa nowego folderu:")||"").trim();'
     'if(!n)return;'
     'try{'
-    'var r=await fetch(location.pathname+"?mkdir="+encodeURIComponent(n),{method:"POST"});'
+    'var r=await afFetch(location.pathname+"?mkdir="+encodeURIComponent(n),{method:"POST"});'
     'if(r.ok){location.reload();}'
     'else{alert("Nie udało się: "+(await r.text()));}'
     '}catch(err){alert("Błąd: "+err);}'
@@ -1925,7 +1937,7 @@ VIEWER_JS = (
 # _cropEsc(): ESC w trybie kadru anuluje (true); poza nim główny keydown -> folder.
 # EXIF orientacja telefonów obsłużona serwerowo (ImageOps.exif_transpose).
 CROP_JS = (
-    '<script>(function(){'
+    '<script>' + JS_ZAPIS + '(function(){'
     'const im=document.querySelector(".stage img");'
     'const ov=document.getElementById("cropov"),box=document.getElementById("cropbox");'
     'const btns=document.getElementById("cropbtns"),hint=document.getElementById("crophint");'
@@ -1993,7 +2005,7 @@ CROP_JS = (
     'h.addEventListener("pointerup",()=>{rz=null;});});'
     'async function doCrop(mode){if(!B){alert("Najpierw zaznacz obszar");return;}clamp();'
     'const r={x:Math.round(B.x),y:Math.round(B.y),w:Math.round(B.w),h:Math.round(B.h),mode:mode};'
-    'try{const res=await fetch(_Q+"?crop",{method:"POST",'
+    'try{const res=await afFetch(_Q+"?crop",{method:"POST",'
     'headers:{"Content-Type":"application/json"},body:JSON.stringify(r)});'
     'const j=await res.json().catch(()=>({}));'
     'if(res.ok){exit();if(mode==="overwrite"){im.src=_Q+"?v="+Date.now();}'
@@ -2106,6 +2118,82 @@ async def straz_ukrytych(request, handler):
     if sciezka_ukryta(request.path):
         return web.Response(status=403, text='403 — pliki i katalogi zaczynające się '
                                              'od kropki są niedostępne.')
+    return await handler(request)
+
+
+# ── Strażnik źródła żądania (B9: DNS rebinding, CSRF) ──────────────────────
+METODY_ZAPISU = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
+
+
+def _nazwa_hosta(host: str) -> str:
+    """Wartość nagłówka Host → nazwa bez portu, małymi literami, bez kropki
+    końcowej; literał IPv6 bez nawiasów."""
+    h = host.strip().lower()
+    if h.startswith('['):
+        return h[1:h.find(']')] if ']' in h else h[1:]
+    if h.count(':') == 1:
+        h = h.split(':', 1)[0]
+    return h.rstrip('.')
+
+
+def host_dozwolony(host: str, dozwolone=()) -> bool:
+    """Literał IP (v4/v6), localhost, nazwy *.local i wpisy dozwolone_hosty
+    (wpis z kropką na początku = sufiks, np. .ts.net). DNS rebinding wymaga
+    nazwy domenowej napastnika — taka nazwa nie przejdzie."""
+    import ipaddress
+    h = _nazwa_hosta(host)
+    if not h:
+        return False
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        pass
+    if h == 'localhost' or h.endswith('.local'):
+        return True
+    for d in dozwolone:
+        if (d.startswith('.') and h.endswith(d)) or h == d:
+            return True
+    return False
+
+
+def origin_zgodny(origin, host: str) -> bool:
+    """Brak Origin (stara przeglądarka, curl) = zgodny; obecny musi wskazywać
+    ten sam host:port co nagłówek Host („null" i obcy host = niezgodny)."""
+    if origin is None:
+        return True
+    from urllib.parse import urlsplit
+    try:
+        netloc = urlsplit(origin.strip()).netloc.lower()
+    except ValueError:
+        return False
+    return bool(netloc) and netloc == host.strip().lower()
+
+
+@web.middleware
+async def straz_zrodla(request, handler):
+    """B9: (a) Host spoza listy → 421; (b) POST/PUT/PATCH/DELETE bez
+    X-AnberFiles: 1 → 403. Wyjątek (b): formularze logowania i „Ustaw hasło"
+    (zwykły <form method=post> przed zalogowaniem, działa bez JS i z menedżerem
+    haseł) — zamiast nagłówka zgodność Origin z Host."""
+    host = request.headers.get('Host')
+    if host is not None and not host_dozwolony(host, KONF.dozwolone_hosty):
+        return web.Response(status=421, text='421 — nieznana nazwa serwera w adresie. '
+                            'Użyj adresu IP, nazwy .local albo dopisz nazwę do '
+                            'dozwolone_hosty w ustawieniach instancji.')
+    if request.method in METODY_ZAPISU:
+        if (KONF.logowanie == 'formularz' and request.path in
+                (_LOGOWANIE.SCIEZKA_LOGOWANIA, _LOGOWANIE.SCIEZKA_USTAWIENIA)):
+            if not origin_zgodny(request.headers.get('Origin'), host or ''):
+                _evlog('ochrona', f'formularz {request.path} z obcego originu '
+                       f'{request.headers.get("Origin")!r} od {request.remote}',
+                       level='warn')
+                return web.Response(status=403, text='403 — formularz wysłany z innej '
+                                                     'strony.')
+        elif request.headers.get(NAGLOWEK_ZAPISU) != '1':
+            return web.Response(status=403, text='403 — brak nagłówka X-AnberFiles: '
+                                'żądanie zmieniające stan przyjmowane tylko ze stron '
+                                'AnberFiles.')
     return await handler(request)
 
 
@@ -3125,7 +3213,7 @@ LEKTORQ_PAGE = (
     '<tbody id="tb"></tbody></table>'
     '<div id="ebw" style="display:none"><h2 style="color:#c00">✖ Nieudane zadania '
     'lektora</h2><table><tbody id="eb"></tbody></table></div>'
-    '<script>' + JS_ESC +
+    '<script>' + JS_ESC + JS_ZAPIS +
     'async function load(){'
     'try{const j=await(await fetch("/?lektorqj=1",{cache:"no-store"})).json();'
     'const tb=document.getElementById("tb");let h="";let i=0;'
@@ -3201,27 +3289,27 @@ LEKTORQ_PAGE = (
     'if(to==="1"&&!confirm("Konsola WYŁĄCZY SIĘ automatycznie po '
     'ukończeniu wszystkich pozycji kolejki (1 min na anulowanie). '
     'Włączyć?"))return;'
-    'let r=await fetch("/?lektorqshutdown="+to,{method:"POST"});'
+    'let r=await afFetch("/?lektorqshutdown="+to,{method:"POST"});'
     'let j=await r.json().catch(()=>({}));'
     'if(j.status==="empty-queue"){'
     'if(confirm("UWAGA: kolejka jest PUSTA — konsola wyłączy się '
     'JUŻ ZA MINUTĘ, nie po przyszłych zadaniach.\\n\\n'
     'Na pewno wyłączyć konsolę teraz?"))'
-    'await fetch("/?lektorqshutdown=1&force=1",{method:"POST"});}'
+    'await afFetch("/?lektorqshutdown=1&force=1",{method:"POST"});}'
     'load();return;}'
     'const r=e.target.closest("a#res");'
     'if(r){e.preventDefault();'
-    'await fetch("/?lektorqresume=1",{method:"POST"});load();return;}'
+    'await afFetch("/?lektorqresume=1",{method:"POST"});load();return;}'
     'const p=e.target.closest("a.p");'
     'if(p){e.preventDefault();'
     'const m=await askPause(p.dataset.i==="ext");'
     'if(!m)return;'
-    'await fetch("/?lektorqpause="+p.dataset.i+"&mode="+m,{method:"POST"});'
+    'await afFetch("/?lektorqpause="+p.dataset.i+"&mode="+m,{method:"POST"});'
     'load();return;}'
     'const a=e.target.closest("a.x");if(!a)return;e.preventDefault();'
     'if(!confirm("Usunąć tę pozycję z kolejki lektora?"+'
     '"\\n(trwająca generacja zostanie przerwana)"))return;'
-    'await fetch("/?lektorqdel="+a.dataset.i,{method:"POST"});load();});'
+    'await afFetch("/?lektorqdel="+a.dataset.i,{method:"POST"});load();});'
     'load();setInterval(load,3000);'
     '</script>')
 
@@ -3423,6 +3511,25 @@ async def lektor_item(request):
     return web.json_response(
         {'status': 'queued' if queued else 'start', 'id': job['id'],
          'out': out.name, 'position': len(_LEKTOR_QUEUE)}, status=202)
+
+
+async def eksport_docx_item(request):
+    """POST ?docx=1 na pliku .md = eksport do .docx (zapis w exports/)."""
+    odm = _odmowa_zapisu()
+    if odm is None:
+        odm = _modul_wylaczony('eksport_docx')
+    if odm is not None:
+        return odm
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return web.Response(status=400)
+    if ROOT not in target.parents:
+        return web.Response(status=403)
+    if not target.is_file() or target.suffix.lower() != '.md':
+        return web.Response(status=400, text='Eksport DOCX: tylko pliki .md')
+    return await _export_md_docx(target)
 
 
 async def mkdir_item(request):
@@ -3735,6 +3842,8 @@ async def upload(request):
         return odm if odm is not None else await print_item(request)
     if 'crop' in request.query:
         return await crop_item(request)
+    if 'docx' in request.query:
+        return await eksport_docx_item(request)
     if any(k in request.query for k in ('lektorqshutdown', 'lektorqpause',
                                         'lektorqresume', 'lektorqdel')):
         odm = _modul_wylaczony('lektor')
@@ -3971,12 +4080,9 @@ async def _serve_file(request, target):
         return web.json_response({'mt': target.stat().st_mtime})
 
     if 'docx' in request.query and target.suffix.lower() == '.md':
-        odm = _odmowa_zapisu()
-        if odm is None:
-            odm = _modul_wylaczony('eksport_docx')
-        if odm is not None:
-            return odm
-        return await _export_md_docx(target)
+        # eksport zapisuje plik w exports/ — tylko POST z nagłówkiem (B9)
+        return web.Response(status=405, headers={'Allow': 'POST'},
+                            text='Eksport DOCX: użyj przycisku w podglądzie (POST).')
 
     if 'view' in request.query and target.suffix.lower() == '.md':
         return web.Response(text=render_md_page(target), content_type='text/html')
@@ -4177,7 +4283,7 @@ def utworz_aplikacje(k):
     _LEKTOR_SHUTDOWN = False
     # client_max_size: ciało żądania wczytywane do pamięci (request.read/post/json)
     # — małe; wgrywanie czyta strumieniowo z własnym licznikiem (upload)
-    app = web.Application(middlewares=[errlog, auth, straz_ukrytych],
+    app = web.Application(middlewares=[errlog, straz_zrodla, auth, straz_ukrytych],
                           client_max_size=LIMIT_CIALA_ZADANIA)
     app.on_response_prepare.append(_naglowki_bezpieczenstwa)   # CSP itd. (A3, C5)
     global _PAMIEC

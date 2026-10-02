@@ -40,7 +40,7 @@ KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
-               'limit_zip_mb'),
+               'limit_zip_mb', 'dozwolone_hosty'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -86,6 +86,9 @@ class Konfiguracja:
     # sieci, z których ekran „Ustaw hasło" przyjmuje hasło BEZ tokenu startowego
     # (domyślnie żadne — token wymagany od wszystkich)
     ustaw_haslo_bez_tokenu: tuple = ()
+    # nazwy w nagłówku Host przyjmowane oprócz literałów IP, localhost i *.local
+    # (B9, DNS rebinding); wpis z kropką na początku = sufiks (np. .ts.net)
+    dozwolone_hosty: tuple = ()
 
     @property
     def katalog_auth(self) -> Path:
@@ -151,6 +154,20 @@ def _sieci(klucz: str, tekst: str) -> tuple:
         except ValueError:
             raise BladKonfiguracji(f'[serwer] {klucz}: {s!r} nie jest adresem '
                                    'ani siecią (np. 192.168.0.0/16)') from None
+    return tuple(wynik)
+
+
+def _hosty(tekst: str) -> tuple:
+    """Lista nazw hostów (po przecinku lub spacji), małymi literami, bez kropki
+    końcowej; wpis z kropką na początku zostaje sufiksem (np. .ts.net)."""
+    wynik = []
+    for s in re.split(r'[\s,]+', tekst.strip().lower()):
+        if not s:
+            continue
+        if not re.fullmatch(r'\.?[a-z0-9_-]+(\.[a-z0-9_-]+)*\.?', s):
+            raise BladKonfiguracji(f'[serwer] dozwolone_hosty: {s!r} nie jest nazwą '
+                                   'hosta (np. jarvis.example.org albo .ts.net)')
+        wynik.append(s.rstrip('.'))
     return tuple(wynik)
 
 
@@ -243,6 +260,7 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         limit_zip_mb=_dodatnia('limit_zip_mb', s.get('limit_zip_mb', '2048')),
         ustaw_haslo_bez_tokenu=_sieci('ustaw_haslo_bez_tokenu',
                                       s.get('ustaw_haslo_bez_tokenu', '')),
+        dozwolone_hosty=_hosty(s.get('dozwolone_hosty', '')),
     )
 
 
