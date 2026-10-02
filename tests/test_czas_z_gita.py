@@ -153,7 +153,7 @@ def test_przeniesienie_nie_jest_zmiana_tresci(repo_przeniesienia, tmp_path):
 
 def test_lista_katalogow_pokazuje_daty_z_bufora(repo_przeniesienia, tmp_path):
     """Lista AnberFiles: Modyfikacja = zmiana treści, Powstanie = dodanie —
-    z bufora w katalogu danych, nie z czasu pobrania klonu."""
+    z bufora w .git klonu (zapisuje go anberfiles-odswiez), nie z czasu pobrania."""
     from datetime import datetime
     from conftest import HASLO, uruchom, wczytaj, zbuduj_jarvis
     import aiohttp
@@ -161,7 +161,7 @@ def test_lista_katalogow_pokazuje_daty_z_bufora(repo_przeniesienia, tmp_path):
     vault = tmp_path / "srv" / "korzen" / "vault"
     shutil.move(str(repo_przeniesienia), str(vault))
     wynik = subprocess.run([sys.executable, str(SKRYPT), str(vault), "--bufor",
-                            str(k.katalog_danych / "czasy-git" / "vault.json")],
+                            str(vault / ".git" / "anberfiles-czasy.json")],
                            capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert wynik.returncode == 0, wynik.stderr
     teraz = time.time()

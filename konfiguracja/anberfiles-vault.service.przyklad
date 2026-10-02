@@ -11,8 +11,7 @@ Type=oneshot
 User=anberfiles
 Group=anberfiles
 ExecStart=/usr/local/bin/anberfiles-odswiez
-# bufor dat listy katalogów (tools/czas_z_gita.py --bufor); przy ProtectSystem=strict
-# katalog musi być w ReadWritePaths:
-# ReadWritePaths=/srv/anberfiles/vault /srv/anberfiles/wykonawca /srv/anberfiles/dane/czasy-git
+# bufor dat listy katalogów: <klon>/.git/anberfiles-czasy.json (zapis w klonie,
+# więc ReadWritePaths klonów wystarcza)
 TimeoutStartSec=300
 Nice=10

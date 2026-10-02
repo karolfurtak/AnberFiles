@@ -145,10 +145,17 @@ def test_odswiez_klony(tmp_path):
         git('clone', '-q', str(zrodlo), str(baza / r))
         (zrodlo / 'a.txt').write_text('2', encoding='utf-8')
         git('commit', '-qam', 'drugi', cwd=zrodlo)
-    env = dict(os.environ, ANBERFILES_BAZA=str(baza))
+    env = dict(os.environ, ANBERFILES_BAZA=str(baza), ANBERFILES_PYTHON=sys.executable,
+               ANBERFILES_KOD=str(REPO))
     r = subprocess.run(['sh', str(ODSWIEZ)], env=env, capture_output=True, text=True,
                        timeout=120)
     assert r.returncode == 0, r.stderr
+    assert 'OSTRZEŻENIE' not in r.stderr, r.stderr
+    # bufor dat dla listy katalogów (02.10): w .git klonu, z obiema datami pliku
+    import json
+    for kl in ('vault', 'wykonawca'):
+        b = json.loads((baza / kl / '.git' / 'anberfiles-czasy.json').read_text(encoding='utf-8'))
+        assert len(b['pliki']['a.txt']) == 2
     assert re.search(r'vault: [0-9a-f]{7,} -> [0-9a-f]{7,}', r.stdout), r.stdout
     assert re.search(r'wykonawca: [0-9a-f]{7,} -> [0-9a-f]{7,}', r.stdout), r.stdout
     assert (baza / 'vault' / 'a.txt').read_text(encoding='utf-8') == '2'

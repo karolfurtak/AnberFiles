@@ -2467,9 +2467,12 @@ def _fmt_size(s):
 
 # ── Daty plików: bufor z historii git i czas powstania z systemu plików ──────
 # Klony git (vault, wykonawca): tools/czas_z_gita.py po każdym odświeżeniu
-# zapisuje <katalog_danych>/czasy-git/<nazwa klonu>.json — zmiana treści
+# zapisuje <klon>/.git/anberfiles-czasy.json — zmiana treści
 # (bez czystych przeniesień) i powstanie (najstarsze dodanie, przez zmiany
 # nazwy). Lista czyta bufor (pamięć zależna od czasu modyfikacji pliku).
+# Bufor leży w .git klonu, bo jednostka odświeżania nie widzi katalogu danych
+# (utwardzenie C4: InaccessiblePaths=/srv/anberfiles/dane), a .git zapisuje i tak.
+PLIK_BUFORA_CZASOW = 'anberfiles-czasy.json'
 # Poza gitem: czas powstania z systemu plików (statx na Linuksie); gdy system
 # go nie podaje — czas modyfikacji z adnotacją „≈".
 _BUFORY_GIT = {}
@@ -2490,10 +2493,9 @@ def _korzen_gita(katalog: Path):
 
 
 def _bufor_czasow(korzen: Path):
-    dane = getattr(KONF, 'katalog_danych', None)
-    if korzen is None or dane is None:
+    if korzen is None:
         return None
-    plik = Path(dane) / 'czasy-git' / f'{korzen.name}.json'
+    plik = korzen / '.git' / PLIK_BUFORA_CZASOW
     try:
         st = plik.stat()
     except OSError:

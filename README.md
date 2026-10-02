@@ -10,7 +10,7 @@ ale serwuje dowolne drzewo katalogów.
 ## Możliwości
 
 **Listing katalogu (sortowalna tabela):**
-- kolumny: Nazwa, Rozmiar, Modyfikacja, Powstanie (klony git: z bufora `czasy-git/` —
+- kolumny: Nazwa, Rozmiar, Modyfikacja, Powstanie (klony git: z bufora `.git/anberfiles-czasy.json` —
   ostatnia zmiana treści i najstarsze dodanie pliku, przez zmiany nazwy; poza gitem:
   czas powstania z systemu plików, a gdy go brak — czas modyfikacji z „≈”)
 - **sortowanie naturalne** — `plik_10` po `plik_9`, nie po `plik_1`
