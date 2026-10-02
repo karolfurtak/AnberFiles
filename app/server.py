@@ -3218,7 +3218,7 @@ async def _serve_file(request, target):
             f'<span id="st" style="color:#8a93a0"></span>'
             + (f'<a href="{q}?read=1" style="color:#6fce8f;'
                'border-color:#2f6b46">📖 śledź tekst</a>' if cue
-               else (f'<span style="color:#6fce8f">🔊 lektor</span>'
+               else ('<span style="color:#6fce8f">🔊 lektor</span>'
                      if aud else ''))
             + f'<a href="{q}?dl=1" style="margin-left:auto">⬇ DOCX</a></div>'
             + audio_html
