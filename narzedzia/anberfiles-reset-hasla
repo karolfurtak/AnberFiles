@@ -13,8 +13,15 @@ Restart usługi NIE jest potrzebny: serwer sprawdza oba pliki przy każdym
 żądaniu. Następny krok: otworzyć AnberFiles przez Tailscale i ustawić nowe
 hasło na ekranie „Ustaw hasło".
 
-Instalacja (dowiązanie, żeby skrypt znalazł katalog app/ repozytorium):
-    sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /usr/local/bin/
+Interpreter: skrypt ma shebang systemowego Pythona, który nie ma biblioteki
+aiohttp (ma ją tylko środowisko usługi). Gdy import się nie uda, skrypt sam
+przełącza się (os.execv) na $ANBERFILES_VENV/bin/python (domyślnie
+/srv/anberfiles/venv/bin/python); zmienna ANBERFILES_RESET_PRZELACZONY
+blokuje pętlę, gdyby i tam modułu brakowało.
+
+Instalacja (dowiązanie w katalogu poleceń administracyjnych, żeby skrypt
+znalazł katalog app/ repozytorium):
+    sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /usr/local/sbin/
 Kod wyjścia: 0 = sukces, 1 = błąd (komunikat na stderr).
 """
 import argparse
@@ -31,6 +38,34 @@ def _katalog_app() -> Path:
 
 
 sys.path.insert(0, str(_katalog_app()))
+
+VENV_DOMYSLNY = '/srv/anberfiles/venv'
+STRAZNIK = 'ANBERFILES_RESET_PRZELACZONY'
+
+
+def interpreter_srodowiska(env=None):
+    """Ścieżka interpretera środowiska usługi albo None, gdy go nie ma."""
+    env = os.environ if env is None else env
+    p = Path(env.get('ANBERFILES_VENV') or VENV_DOMYSLNY) / 'bin' / 'python'
+    return p if p.is_file() else None
+
+
+def przelacz_na_srodowisko(argv):
+    """Uruchamia ten sam skrypt interpreterem środowiska usługi (os.execv).
+    Wraca (False) tylko wtedy, gdy przełączenie nie jest możliwe albo
+    już się odbyło — wtedy wołający zgłasza zwykły błąd."""
+    if os.name != 'posix' or os.environ.get(STRAZNIK):
+        return False
+    py = interpreter_srodowiska()
+    if py is None:
+        return False
+    try:
+        if py.samefile(sys.executable):
+            return False
+    except OSError:
+        pass
+    os.environ[STRAZNIK] = '1'
+    os.execv(str(py), [str(py), os.path.abspath(__file__), *argv])
 
 
 def sprawdz_uprawnienia(katalog: Path, euid=None):
@@ -68,8 +103,10 @@ def glowna(argv=None) -> int:
         import konfiguracja
         import logowanie
     except ImportError as e:
+        przelacz_na_srodowisko(sys.argv[1:] if argv is None else list(argv))
         return _blad(f'nie znaleziono modułów AnberFiles ({e}); ustaw ANBERFILES_KOD '
-                     'na katalog repozytorium albo zainstaluj skrypt dowiązaniem')
+                     'na katalog repozytorium, a ANBERFILES_VENV na środowisko z '
+                     'bibliotekami (domyślnie /srv/anberfiles/venv)')
     try:
         k = konfiguracja.wczytaj(Path(a.conf), env={})
     except konfiguracja.BladKonfiguracji as e:

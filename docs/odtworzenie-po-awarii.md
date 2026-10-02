@@ -21,6 +21,7 @@ z kopią plików instancji (wynik `anberfiles-kopia-plikow`).
 | `/srv/anberfiles/eksport/lektor-ustawienia.conf` | kopia plików instancji | ustawienia lektora |
 | `/srv/anberfiles/korzen/lektor/` | kopia plików instancji | nagrania lektora (jedyna treść tworzona na Jarvisie) |
 | `/usr/local/bin/anberfiles-odswiez` | kopia plików instancji | także `narzedzia/` w repozytorium |
+| `/etc/systemd/system/jarvis-backup-obraz-karty.service.d/anberfiles.conf` | **nie jest w kopii plików** (patrz punkt 4) | odtworzenie jednym poleceniem |
 | `/srv/anberfiles/.ssh/config` | kopia plików instancji | aliasy hostów kluczy wdrożeniowych |
 | Lista pakietów z wersjami | kopia plików instancji (`pakiety.txt`) | do porównania po instalacji |
 
@@ -36,10 +37,12 @@ z kopią plików instancji (wynik `anberfiles-kopia-plikow`).
 
 ## 2. Kroki (jedno polecenie na krok)
 
-Łączny czas: ok. 60–75 min, z czego ok. 30 min to pobieranie pakietów.
+Czasy zmierzone przy pierwszej instalacji na Jarvisie (Raspberry Pi 5, łącze domowe).
+Łączny czas bez kroków wymagających człowieka (klucze wdrożeniowe, Tailscale,
+hasło): ok. 8 min; z tymi krokami zwykle poniżej 30 min.
 
-1. **Pakiety systemowe** (ok. 25 min):
-   `sudo apt-get install -y git rsync python3-venv mpg123 flac cups cups-client cups-filters avahi-utils libreoffice-writer-nogui fonts-liberation2 fonts-dejavu-core`
+1. **Pakiety systemowe** (zmierzone: ok. 2,5 min, w tym `apt-get update`):
+   `sudo apt-get update && sudo apt-get install -y --no-install-recommends git rsync python3-venv mpg123 flac cups cups-client cups-filters avahi-utils libreoffice-writer-nogui fonts-liberation2 fonts-dejavu-core`
    Wersje porównać z `<kopia>/pakiety.txt`.
 2. **Tailscale** (ok. 5 min, logowanie w przeglądarce):
    `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up`
@@ -49,11 +52,11 @@ z kopią plików instancji (wynik `anberfiles-kopia-plikow`).
    `sudo -u anberfiles mkdir -p /srv/anberfiles/dane /srv/anberfiles/eksport /srv/anberfiles/korzen/lektor /srv/anberfiles/korzen/vault /srv/anberfiles/korzen/wykonawca /srv/anberfiles/.ssh`
 5. **Kod** (1 min):
    `sudo -u anberfiles git clone https://github.com/karolfurtak/AnberFiles.git /srv/anberfiles/kod`
-6. **Środowisko Pythona** (ok. 5 min):
+6. **Środowisko Pythona** (zmierzone: ok. 1 min, 7 bibliotek):
    `sudo -u anberfiles python3 -m venv /srv/anberfiles/venv && sudo -u anberfiles /srv/anberfiles/venv/bin/pip install -r /srv/anberfiles/kod/requirements.txt`
 7. **Zatrzymanie CUPS przed wgraniem drukarek** (1 min):
    `sudo systemctl stop cups`
-8. **Pliki instancji z kopii** (1–5 min, zależnie od liczby nagrań):
+8. **Pliki instancji z kopii** (zmierzone: 2 s przy 272 kB; więcej przy dużej liczbie nagrań):
    `sudo rsync -a <kopia>/pliki/ /`
    Potem właściciel (numery użytkowników na nowym systemie bywają inne):
    `sudo chown -R anberfiles:anberfiles /srv/anberfiles/eksport /srv/anberfiles/korzen/lektor /srv/anberfiles/.ssh`
@@ -70,13 +73,19 @@ z kopią plików instancji (wynik `anberfiles-kopia-plikow`).
    Bez kopii `.ssh/config` — wpisy (alias → klucz):
    `Host github-vault` / `HostName github.com` / `User git` / `IdentityFile /srv/anberfiles/.ssh/vault`
    i analogicznie `github-wykonawca`.
-10. **Klony vaulta i Wykonawcy** (ok. 5 min):
+10. **Klony vaulta i Wykonawcy** (zmierzone: ok. 25 s łącznie, vault 270 MB):
     `sudo -u anberfiles git clone git@github-vault:karolfurtak/backup-asystent-ai.git /srv/anberfiles/vault`
     `sudo -u anberfiles git clone git@github-wykonawca:karolfurtak/jarwis-wykonawca.git /srv/anberfiles/wykonawca`
 11. **Lektor — program syntezy** (1 min):
     `sudo -u anberfiles cp /srv/anberfiles/kod/tools/czytaj_tts.py /srv/anberfiles/eksport/`
-12. **Polecenia administracyjne** (1 min; dowiązania, by skrypty znalazły kod):
-    `sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-odswiez /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /srv/anberfiles/kod/narzedzia/anberfiles-kopia-plikow /usr/local/bin/`
+12. **Polecenia** (1 min; dowiązania, by skrypty znalazły kod). Odświeżanie klonów
+    woła jednostka systemd, więc leży w `/usr/local/bin`; polecenia administracyjne
+    (reset hasła, kopia plików) w `/usr/local/sbin`:
+    `sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-odswiez /usr/local/bin/`
+    `sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /srv/anberfiles/kod/narzedzia/anberfiles-kopia-plikow /usr/local/sbin/`
+    Reset hasła sam przełącza się na `/srv/anberfiles/venv/bin/python`, bo
+    systemowy Python nie ma biblioteki `aiohttp` (inna ścieżka środowiska: zmienna
+    `ANBERFILES_VENV`).
 13. **CUPS z powrotem** (1 min):
     `sudo systemctl start cups`
 14. **Usługi** (1 min):
@@ -85,7 +94,9 @@ z kopią plików instancji (wynik `anberfiles-kopia-plikow`).
     `journalctl -u anberfiles -n 20 --no-pager`
 16. **Sprawdzenie autostartu** (1 min; obie odpowiedzi `enabled`):
     `systemctl is-enabled anberfiles anberfiles-vault.timer`
-17. **Hasło** (1 min): z urządzenia w Tailscale otworzyć `http://<adres-tailscale>:8790/`,
+17. **Hasło** (1 min; port 8790 jest dostępny tylko przez Tailscale — zapora `ufw`
+    domyślnie odrzuca ruch przychodzący z sieci lokalnej i nie ma reguły dla 8790;
+    reguły `ufw allow 8790` NIE dodawać): z urządzenia w Tailscale otworzyć `http://<adres-tailscale>:8790/`,
     ekran „Ustaw hasło" (co najmniej 10 znaków). Ekran działa wyłącznie z sieci lokalnej
     i Tailscale; po ustawieniu znika na stałe.
 18. **Dowód** (3 min): `sudo reboot`, po starcie ponownie krok 15 i wejście z zapamiętanego
@@ -97,6 +108,10 @@ z kopią plików instancji (wynik `anberfiles-kopia-plikow`).
 (wszystkie urządzenia wylogowane). Restart usługi niepotrzebny. Potem krok 17.
 Resetu przez stronę WWW nie ma.
 
+Odtworzenie z **obrazu całej karty systemowej** przywraca też `dane/auth/`
+(skrót hasła scrypt i sekret), czyli STARE hasło i zapamiętane urządzenia.
+Odtworzenie z **kopii plików instancji** tego nie robi — wtedy ekran „Ustaw hasło".
+
 ## 4. Kopia plików instancji (przed awarią)
 
 `sudo anberfiles-kopia-plikow <kopia>` — lustro wymienionych w punkcie 1 plików
@@ -104,3 +119,21 @@ w `<kopia>/pliki/`, lista pakietów w `<kopia>/pakiety.txt`, data w `<kopia>/.os
 Skrypt przerywa z kodem 1, jeśli w kopii znalazłby się skrót hasła, sekret,
 `haslo.env` albo klucz prywatny. `<kopia>` musi leżeć poza Jarvisem
 (inny dysk albo urządzenie), inaczej awaria zabierze ją razem z instancją.
+
+Kopia wykonuje się automatycznie przy cotygodniowym obrazie karty systemowej:
+drop-in `/etc/systemd/system/jarvis-backup-obraz-karty.service.d/anberfiles.conf`
+z linią `ExecStartPre=-+/usr/local/sbin/anberfiles-kopia-plikow /srv/kopie/obrazy-systemow/anberfiles`
+zapisuje ją na osobny dysk kopii (`/srv/kopie`, migawki dzienne). Sam drop-in
+nie jest w kopii plików — odtworzenie jednym poleceniem:
+`sudo mkdir -p /etc/systemd/system/jarvis-backup-obraz-karty.service.d && printf '[Service]
+ExecStartPre=-+/usr/local/sbin/anberfiles-kopia-plikow /srv/kopie/obrazy-systemow/anberfiles
+' | sudo tee /etc/systemd/system/jarvis-backup-obraz-karty.service.d/anberfiles.conf && sudo systemctl daemon-reload`
+
+## 5. Uwagi o ustawieniach systemu
+
+- **Limit pamięci jest dziś deklaracją.** Jądro Raspberry Pi OS startuje z
+  `cgroup_disable=memory`, więc `MemoryMax=768M` w jednostce nie jest egzekwowany,
+  dopóki w `/boot/firmware/cmdline.txt` nie ma `cgroup_enable=memory` (decyzja
+  właściciela, wymaga restartu).
+- **Lektor — drugi głos Piper:** wybierany w `lektor-ustawienia.conf`
+  (`silnik = piper`, usługa lokalna na porcie 8123).

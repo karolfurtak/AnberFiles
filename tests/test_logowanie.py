@@ -467,3 +467,67 @@ def test_skrypt_resetu_uzywa_modulu_konfiguracji():
     tekst = RESET.read_text(encoding='utf-8')
     assert 'konfiguracja' in tekst and 'configparser' not in tekst
     assert Path(RESET).read_text(encoding='utf-8').startswith('#!/usr/bin/env python3')
+
+
+# ── reset przy systemowym Pythonie bez aiohttp ──────────────────────────────
+
+def _bez_aiohttp(tmp_path):
+    """Katalog z atrapą aiohttp, która zachowuje się jak jej brak."""
+    blokada = tmp_path / 'blokada'
+    (blokada / 'aiohttp').mkdir(parents=True)
+    (blokada / 'aiohttp' / '__init__.py').write_text(
+        "raise ModuleNotFoundError(\"No module named 'aiohttp'\")\n", encoding='utf-8')
+    return blokada
+
+
+def _reset_systemowy(conf, blokada, venv, **env_extra):
+    env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONPATH=str(blokada),
+               ANBERFILES_VENV=str(venv), **env_extra)
+    env.pop('ANBERFILES_CONF', None)
+    env.pop('ANBERFILES_RESET_PRZELACZONY', None)
+    return subprocess.run([sys.executable, str(RESET), '--conf', str(conf)], env=env,
+                          capture_output=True, text=True, encoding='utf-8', timeout=60)
+
+
+def _atrapa_venv(tmp_path):
+    """Środowisko usługi: bin/python odpala prawdziwy interpreter, bez blokady."""
+    py = tmp_path / 'venv' / 'bin' / 'python'
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\nunset PYTHONPATH\nexec "{sys.executable}" "$@"\n',
+                  encoding='utf-8')
+    py.chmod(0o755)
+    return tmp_path / 'venv'
+
+
+def test_reset_bez_aiohttp_i_bez_srodowiska_czytelny_blad(tmp_path):
+    """Brak biblioteki i brak środowiska usługi: błąd z nazwą braku, bez pętli."""
+    conf, k = _instancja(tmp_path)
+    r = _reset_systemowy(conf, _bez_aiohttp(tmp_path), tmp_path / 'nie-ma-venv')
+    assert r.returncode == 1
+    assert 'aiohttp' in r.stderr and 'ANBERFILES_VENV' in r.stderr
+    assert 'Traceback' not in r.stderr
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='os.execv na środowisko — tylko Linux')
+def test_reset_przelacza_sie_na_srodowisko_uslugi(tmp_path):
+    """RED przed naprawą: „No module named 'aiohttp'". GREEN: reset działa."""
+    import logowanie
+    conf, k = _instancja(tmp_path)
+    assert (k.katalog_auth / logowanie.PLIK_HASLA).exists()
+    r = _reset_systemowy(conf, _bez_aiohttp(tmp_path), _atrapa_venv(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert 'aiohttp' not in r.stderr
+    assert not (k.katalog_auth / logowanie.PLIK_HASLA).exists()
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='os.execv na środowisko — tylko Linux')
+def test_reset_przelaczenie_bez_petli(tmp_path):
+    """Środowisko usługi też bez aiohttp: jeden błąd, nie pętla exec."""
+    conf, k = _instancja(tmp_path)
+    venv = tmp_path / 'venv'
+    py = venv / 'bin' / 'python'
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding='utf-8')
+    py.chmod(0o755)                                  # PYTHONPATH z blokadą zostaje
+    r = _reset_systemowy(conf, _bez_aiohttp(tmp_path), venv)
+    assert r.returncode == 1 and 'aiohttp' in r.stderr
