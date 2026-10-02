@@ -8,3 +8,11 @@ rate           = +0%
 kopiuj_do      = nie      # brak biblioteki Music konsoli — bez kopii
 opisuj_grafiki = nie      # opisy ilustracji modelem wizyjnym wyłączone
 # home_opisow  = /root    # katalog domowy dla programu opisującego ilustracje
+
+# Silnik mowy: edge  = głosy online Microsoftu (wymaga internetu, jak na Anbernicu)
+#              piper = lokalna usługa Piper (serwer_tts.py), bez internetu; tylko głos
+#                      polski pl_PL-darkman-medium — wstawki angielskie czyta polską wymową;
+#                      mp3/flac przez ffmpeg, wav bez dodatkowych programów.
+# Parametr --silnik ma pierwszeństwo. voice/rate dotyczą tylko edge (tempo Pipera ustawia usługa).
+silnik         = edge
+piper_adres    = http://127.0.0.1:8123

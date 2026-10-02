@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lektor sprawozdań — .md → MP3 (edge-tts, głosy neuronowe pl-PL).
+"""Lektor sprawozdań — .md → MP3 (edge-tts lub lokalny Piper, głos pl-PL).
 
 Pipeline: markdown → czysty tekst → NORMALIZACJA (liczby słownie przez
 num2words, jednostki z polską odmianą, symbole °/%/≈/greka, odnośniki
@@ -9,12 +9,22 @@ Użycie:
     python3 czytaj_tts.py plik.md [-o wyjście.mp3] [--voice marek|zofia]
                                   [--rate -10%..+30%]
 
-Wymaga internetu (głosy online Microsoftu). Pakiety: edge-tts, num2words.
+Silnik (`silnik` w lektor-ustawienia.conf albo --silnik; CLI > conf > edge):
+  edge  — głosy online Microsoftu (wymaga internetu), domyślny;
+  piper — lokalna usługa HTTP serwer_tts.py (`piper_adres`, domyślnie
+          http://127.0.0.1:8123), bez internetu; zdanie po zdaniu, PCM →
+          WAV (biblioteka standardowa) albo MP3/FLAC przez ffmpeg; zapisuje
+          <wyjście>.cues.json z DOKŁADNYMI czasami zdań (z długości PCM).
+Pakiety: edge-tts, num2words.
 """
 import argparse
 import asyncio
+import json
 import re
 import sys
+import time
+import urllib.error  # noqa: F401 — wyjątki urlopen
+import urllib.request
 from pathlib import Path
 
 try:
@@ -380,6 +390,72 @@ def _chunks_sig(chunks: list, rate: str) -> str:
     return h.hexdigest()[:16]
 
 
+_MP3_KBPS = {  # indeks bitrate → kb/s: MPEG-1 L3 / MPEG-2 i 2.5 L3
+    1: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)}
+_MP3_SR = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000),
+           0: (11025, 12000, 8000)}
+
+
+def _mp3_sekundy(buf: bytes) -> float:
+    """Czas trwania MP3 (Layer III) z nagłówków ramek — dokładny także przy
+    zmiennym bitrate; śmieci między ramkami (ID3) są pomijane."""
+    i, n, sek = 0, len(buf), 0.0
+    while i + 4 <= n:
+        if buf[i] != 0xFF or (buf[i + 1] & 0xE0) != 0xE0:
+            i += 1
+            continue
+        ver = (buf[i + 1] >> 3) & 3          # 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+        lay = (buf[i + 1] >> 1) & 3          # 1 = Layer III
+        bi = buf[i + 2] >> 4
+        si = (buf[i + 2] >> 2) & 3
+        if ver == 1 or lay != 1 or bi in (0, 15) or si == 3:
+            i += 1
+            continue
+        sr = _MP3_SR[ver][si]
+        kbps = _MP3_KBPS[1 if ver == 3 else 2][bi]
+        pad = (buf[i + 2] >> 1) & 1
+        probki = 1152 if ver == 3 else 576
+        dl = probki // 8 * kbps * 1000 // sr + pad
+        if dl < 4:
+            i += 1
+            continue
+        sek += probki / sr
+        i += dl
+    return sek
+
+
+def _cues_z_granic(zdarzenia: list, tekst: str, t0: float) -> list:
+    """Zdarzenia granic edge-tts (offset/duration w jednostkach 100 ns,
+    liczone od początku chunka) → [{"t", "text"}] przesunięte o t0 s.
+    SentenceBoundary (edge-tts ≥ 7) — wprost; same WordBoundary (starsze
+    wersje) — początek zdania = offset jego pierwszego słowa (przybliżenie
+    po liczbie słów)."""
+    zd = [z for z in zdarzenia if z.get('type') == 'SentenceBoundary']
+    if zd:
+        return [{'t': round(t0 + z['offset'] / 1e7, 3),
+                 'text': z.get('text', '').strip()} for z in zd]
+    slowa = [z for z in zdarzenia if z.get('type') == 'WordBoundary']
+    if not slowa:
+        return []
+    out, k = [], 0
+    for sent in re.split(r'(?<=[.!?])\s+', tekst):
+        sent = sent.strip()
+        if not re.search(r'\w', sent) or k >= len(slowa):
+            continue
+        out.append({'t': round(t0 + slowa[k]['offset'] / 1e7, 3),
+                    'text': sent})
+        k += len(re.findall(r'\w+', sent))
+    return out
+
+
+def zapisz_cues(audio: Path, cues: list):
+    """Sidecar czasów zdań dla podglądu ?read: <stem>.cues.json obok audio
+    (serwer szuka <dokument>_lektor.cues.json), [{"t": s, "text": zdanie}]."""
+    audio.with_name(audio.stem + '.cues.json').write_text(
+        json.dumps(cues, ensure_ascii=False), encoding='utf-8')
+
+
 async def synth(chunks: list, out: Path, rate: str):
     """chunks = [(voice, tekst)] → edge-tts → MP3.
     Jakość: 96 kbps (EDGE_TTS_FORMAT przez patch biblioteki; darmowy
@@ -388,19 +464,24 @@ async def synth(chunks: list, out: Path, rate: str):
     i wraca domyślne 48 kbps — degradacja łagodna.
     CHECKPOINT co chunk (plik <out>.resume.json): po przerwaniu
     (kill/pauza/reboot konsoli) ponowne wywołanie WZNAWIA od ostatniego
-    ukończonego chunka, o ile tekst/głos/tempo się nie zmieniły."""
-    import json
+    ukończonego chunka, o ile tekst/głos/tempo się nie zmieniły.
+    CUES: z granic zdań edge-tts, przesunięte o czas poprzednich chunków
+    (z ramek MP3) → <out>.cues.json; stan cues jest w checkpoincie."""
     import os
     os.environ['EDGE_TTS_FORMAT'] = 'audio-24khz-96kbitrate-mono-mp3'
     total = len(chunks)
     sig = _chunks_sig(chunks, rate)
     res_p = Path(str(out) + '.resume.json')
     start, mode = 0, 'wb'
+    cues, t0 = [], 0.0
     if res_p.exists() and out.exists():
         try:
             st = json.loads(res_p.read_text())
             if st.get('sig') == sig and 0 < st.get('done', 0) < total:
                 start, mode = st['done'], 'ab'
+                # checkpoint bez cues (stara wersja) → cues niekompletne: brak
+                cues = st.get('cues')
+                t0 = st.get('t0', _mp3_sekundy(out.read_bytes()))
                 print(f'  WZNAWIAM od chunka {start + 1}/{total} '
                       f'(checkpoint)', flush=True)
         except Exception:
@@ -415,12 +496,15 @@ async def synth(chunks: list, out: Path, rate: str):
             # RETRY per chunk: sieć mruga, a po pauzie (SIGSTOP/SIGCONT
             # z kolejki) websocket bywa zerwany — chunk odtwarzamy w całości
             for attempt in range(3):
-                buf = b''
+                buf, granice = b'', []
                 try:
                     com = edge_tts.Communicate(ch, voice, rate=rate)
                     async for msg in com.stream():
                         if msg['type'] == 'audio':
                             buf += msg['data']
+                        elif msg['type'] in ('SentenceBoundary',
+                                             'WordBoundary'):
+                            granice.append(msg)
                     if not buf:
                         raise RuntimeError('pusty chunk')
                     f.write(buf)
@@ -432,12 +516,205 @@ async def synth(chunks: list, out: Path, rate: str):
                           f'ponawiam ({attempt + 2}/3)...', flush=True)
                     await asyncio.sleep(5)
             f.flush()
-            res_p.write_text(json.dumps({'sig': sig, 'done': i}))
+            if cues is not None:
+                cues += _cues_z_granic(granice, ch, t0)
+            dl = _mp3_sekundy(buf)
+            if not dl and granice:      # ramek nie rozpoznano — z granic
+                dl = max((g['offset'] + g.get('duration', 0)) / 1e7
+                         for g in granice)
+            t0 += dl
+            res_p.write_text(json.dumps({'sig': sig, 'done': i,
+                                         'cues': cues, 't0': t0}))
     _progress(out, total, total)
+    if cues:
+        zapisz_cues(out, cues)
     try:
         res_p.unlink()
     except FileNotFoundError:
         pass
+
+
+LOCK_FILE = Path('/tmp/lektor.lock')
+
+
+def _rygiel():
+    """GLOBALNY RYGIEL: jeden lektor naraz w całym systemie (agent z Discorda,
+    serwer plików, CLI — wszyscy przechodzą tędy). flock blokuje do czasu
+    zwolnienia — wywołanie po prostu poczeka na swoją kolej. Zwraca uchwyt
+    pliku (trzymać do końca procesu). Windows (brak fcntl) — bez rygla."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    lock_f = open(LOCK_FILE, 'w')
+    try:
+        fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print('Lektor zajęty — czekam na swoją kolej...', flush=True)
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+    return lock_f
+
+
+# ── SILNIK PIPER (lokalna usługa HTTP serwer_tts.py) ─────────────────────────
+PIPER_ADRES_DOMYSLNY = 'http://127.0.0.1:8123'
+PIPER_TIMEOUT = 60          # s, limit na KAŻDE żądanie syntezy
+PIPER_TIMEOUT_ZDROWIE = 10  # s, sprawdzenie gotowości usługi
+PIPER_PROBY = 3             # prób na jedno zdanie
+PIPER_PAUZA = 2             # s między próbami
+CISZA_S = 0.25              # cisza między zdaniami (sklejanie PCM)
+
+
+class PiperBlad(RuntimeError):
+    """Usługa Piper niedostępna albo zdanie nie dało się zsyntezować."""
+
+
+def zdania(segments: list) -> list:
+    """Segmenty (lang, txt) → lista zdań; podział jak w build_chunks.
+    Wstawki angielskie (lang='en') też idą do Pipera — usługa ma tylko głos
+    polski, więc angielskie słowa przeczyta polską wymową."""
+    out = []
+    for _lang, txt in segments:
+        for sent in re.split(r'(?<=[.!?])\s+', txt):
+            sent = sent.strip()
+            if re.search(r'\w', sent):
+                out.append(sent)
+    return out
+
+
+def piper_zdrowie(adres: str) -> int:
+    """GET /zdrowie → sample_rate. Niegotowa / brak odpowiedzi → PiperBlad."""
+    try:
+        with urllib.request.urlopen(adres.rstrip('/') + '/zdrowie',
+                                    timeout=PIPER_TIMEOUT_ZDROWIE) as r:
+            j = json.loads(r.read().decode('utf-8'))
+        if j.get('gotowy') and int(j.get('sample_rate', 0)) > 0:
+            return int(j['sample_rate'])
+        powod = f'gotowy={j.get("gotowy")}'
+    except Exception as e:
+        powod = f'{type(e).__name__}: {e}'
+    raise PiperBlad(f'usługa Piper niedostępna pod {adres} ({powod})')
+
+
+def _piper_zdanie(adres: str, tekst: str) -> bytes:
+    """POST /syntezuj (jedno zdanie, utf-8) → surowe PCM s16le mono."""
+    req = urllib.request.Request(
+        adres.rstrip('/') + '/syntezuj', data=tekst.encode('utf-8'),
+        headers={'Content-Type': 'text/plain; charset=utf-8'}, method='POST')
+    with urllib.request.urlopen(req, timeout=PIPER_TIMEOUT) as r:
+        pcm = r.read()
+    if not pcm:
+        raise PiperBlad('pusta odpowiedź (0 bajtów PCM)')
+    return pcm[:len(pcm) & ~1]          # tylko pełne próbki 16-bit
+
+
+def synth_piper(sentences: list, out: Path, adres: str) -> tuple:
+    """Zdania → <out>.pcm (surowe PCM sklejone ciszą CISZA_S) + cues.
+    CHECKPOINT co zdanie (<out>.resume.json, jak przy edge): po przerwaniu
+    ponowne wywołanie wznawia od ostatniego ukończonego zdania, o ile tekst
+    i częstotliwość się nie zmieniły. Zwraca (ścieżka_pcm, sample_rate, cues),
+    cues = [{"t": sekunda_początku, "text": zdanie}]."""
+    sr = piper_zdrowie(adres)
+    total = len(sentences)
+    sig = _chunks_sig([('piper', s) for s in sentences], f'piper{sr}')
+    res_p = Path(str(out) + '.resume.json')
+    pcm_p = Path(str(out) + '.pcm')
+    cisza = bytes(int(sr * CISZA_S) * 2)
+    start, cues, bajty = 0, [], 0
+    if res_p.exists() and pcm_p.exists():
+        try:
+            st = json.loads(res_p.read_text())
+            if st.get('sig') == sig and 0 < st.get('done', 0) < total \
+                    and pcm_p.stat().st_size >= st['bajty']:
+                start, cues, bajty = st['done'], st['cues'], st['bajty']
+                print(f'  WZNAWIAM od zdania {start + 1}/{total} '
+                      f'(checkpoint)', flush=True)
+        except Exception:
+            start, cues, bajty = 0, [], 0
+    with open(pcm_p, 'r+b' if start else 'wb') as f:
+        f.truncate(bajty)
+        f.seek(bajty)
+        for i, sent in enumerate(sentences, 1):
+            if i <= start:
+                continue
+            print(f'  Piper {i}/{total} ({len(sent)} znaków)...', flush=True)
+            _progress(out, i - 1, total)
+            for proba in range(1, PIPER_PROBY + 1):
+                try:
+                    pcm = _piper_zdanie(adres, sent)
+                    break
+                except Exception as e:
+                    if proba == PIPER_PROBY:
+                        raise PiperBlad(
+                            f'Piper ({adres}): zdanie {i}/{total} nieudane po '
+                            f'{PIPER_PROBY} próbach — {type(e).__name__}: {e}')
+                    print(f'  zdanie {i}: {type(e).__name__} — ponawiam '
+                          f'({proba + 1}/{PIPER_PROBY})...', flush=True)
+                    time.sleep(PIPER_PAUZA)
+            if i > 1:
+                f.write(cisza)
+                bajty += len(cisza)
+            cues.append({'t': round(bajty / (2 * sr), 3), 'text': sent})
+            f.write(pcm)
+            bajty += len(pcm)
+            f.flush()
+            res_p.write_text(json.dumps(
+                {'sig': sig, 'done': i, 'bajty': bajty, 'cues': cues}))
+    _progress(out, total, total)
+    return pcm_p, sr, cues
+
+
+def pcm_do_pliku(pcm_p: Path, sr: int, out: Path, fmt: str) -> Path:
+    """PCM s16le mono → WAV (moduł wave) albo MP3/FLAC (ffmpeg)."""
+    import shutil
+    import subprocess
+    import wave
+    final = out.with_suffix('.' + fmt)
+    if fmt == 'wav':
+        with wave.open(str(final), 'wb') as w, open(pcm_p, 'rb') as f:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            while True:
+                b = f.read(1 << 20)
+                if not b:
+                    break
+                w.writeframes(b)
+        return final
+    if shutil.which('ffmpeg') is None:
+        raise PiperBlad(f'brak programu ffmpeg — nie zrobię {fmt.upper()} '
+                        f'(ustaw format = wav albo zainstaluj ffmpeg)')
+    kodek = ['-b:a', '96k'] if fmt == 'mp3' else []
+    r = subprocess.run(
+        ['ffmpeg', '-y', '-loglevel', 'error', '-f', 's16le', '-ar', str(sr),
+         '-ac', '1', '-i', str(pcm_p), *kodek, str(final)],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise PiperBlad(f'ffmpeg zakończył się kodem {r.returncode}: '
+                        f'{r.stderr.strip()[-300:]}')
+    return final
+
+
+def _main_piper(segments, mp3: Path, fmt: str, adres: str, tabele: str,
+                naglowki: str, total: int) -> Path:
+    """Ścieżka silnika piper: zdania → PCM → plik + <wyjście>.cues.json.
+    Checkpoint i surowe PCM noszą nazwę <wyjście>.mp3.* — tak samo jak przy
+    edge, więc wznowienie i sprzątanie serwera działają bez zmian."""
+    sentences = zdania(segments)
+    n_en = sum(1 for lg, _ in segments if lg == 'en')
+    print(f'Lektor: Piper ({adres}), tabele={tabele}, nagłówki={naglowki}, '
+          f'wstawki EN: {n_en} (czytane głosem polskim), {len(sentences)} '
+          f'zdań, {total} znaków → {mp3.with_suffix("." + fmt)}', flush=True)
+    if not sentences:
+        raise PiperBlad('brak zdań do przeczytania')
+    pcm_p, sr, cues = synth_piper(sentences, mp3, adres)
+    final = pcm_do_pliku(pcm_p, sr, mp3, fmt)
+    zapisz_cues(final, cues)
+    for p in (pcm_p, Path(str(mp3) + '.resume.json')):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+    return final
 
 
 def build_chunks(segments: list, voice_pl: str, voice_en: str) -> list:
@@ -493,6 +770,9 @@ def main():
     ap.add_argument('--opisy', choices=['tak', 'nie'], default=None,
                     help='opisy ilustracji modelem wizyjnym '
                          '(domyślnie z lektor-ustawienia.conf)')
+    ap.add_argument('--silnik', choices=['edge', 'piper'], default=None,
+                    help='silnik mowy (domyślnie z lektor-ustawienia.conf, '
+                         'inaczej edge)')
     ap.add_argument('--dump-text', action='store_true',
                     help='wypisz znormalizowany tekst i zakończ (debug)')
     a = ap.parse_args()
@@ -503,6 +783,10 @@ def main():
     if voice not in VOICES:
         voice = 'marek'
     rate = a.rate or cfg.get('rate', '+0%')
+    silnik = a.silnik or cfg.get('silnik', 'edge')
+    if silnik not in ('edge', 'piper'):
+        silnik = 'edge'
+    piper_adres = cfg.get('piper_adres', '') or PIPER_ADRES_DOMYSLNY
     tabele = cfg.get('tabele', 'czytaj')
     naglowki = cfg.get('naglowki', 'tak')
 
@@ -514,16 +798,7 @@ def main():
         print(f'BŁĄD: brak pliku {src}')
         sys.exit(1)
 
-    # GLOBALNY RYGIEL: jeden lektor naraz w całym systemie (agent z Discorda,
-    # serwer plików, CLI — wszyscy przechodzą tędy). flock blokuje do czasu
-    # zwolnienia — wywołanie po prostu poczeka na swoją kolej.
-    import fcntl
-    _lock_f = open('/tmp/lektor.lock', 'w')
-    try:
-        fcntl.flock(_lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print('Lektor zajęty — czekam na swoją kolej...', flush=True)
-        fcntl.flock(_lock_f, fcntl.LOCK_EX)
+    _lock_f = _rygiel()  # noqa: F841 — trzymany do końca procesu
     raw = src.read_text(encoding='utf-8', errors='replace')
     # opisy ilustracji (model wizyjny) — PRZED normalizacją, żeby opis
     # przeszedł przez pełną normalizację liczb/jednostek jak zwykły tekst
@@ -546,17 +821,24 @@ def main():
            or cfg.get('format', 'mp3'))
     if fmt not in ('mp3', 'wav', 'flac'):
         fmt = 'mp3'
-    chunks = build_chunks(segments, VOICES[voice], voice_en)
-    n_en = sum(1 for v, _ in chunks if v == voice_en)
-    print(f'Lektor: {VOICES[voice]}, rate {rate}, tabele={tabele}, '
-          f'nagłówki={naglowki}, wstawki EN: {n_en}, {total} znaków '
-          f'→ {out.with_suffix("." + fmt)}')
     mp3 = out.with_suffix('.mp3')
     try:
-        asyncio.run(synth(chunks, mp3, rate))
-        # WAV/FLAC: dekodowanie z mp3 96 kbps — zero DODATKOWEJ straty
-        # (endpoint nie daje PCM; 96k to maksimum jakości tego serwisu)
-        final = mp3 if fmt == 'mp3' else _convert(mp3, fmt)
+        if silnik == 'piper':
+            final = _main_piper(segments, mp3, fmt, piper_adres, tabele,
+                                naglowki, total)
+        else:
+            chunks = build_chunks(segments, VOICES[voice], voice_en)
+            n_en = sum(1 for v, _ in chunks if v == voice_en)
+            print(f'Lektor: {VOICES[voice]}, rate {rate}, tabele={tabele}, '
+                  f'nagłówki={naglowki}, wstawki EN: {n_en}, {total} znaków '
+                  f'→ {out.with_suffix("." + fmt)}')
+            asyncio.run(synth(chunks, mp3, rate))
+            # WAV/FLAC: dekodowanie z mp3 96 kbps — zero DODATKOWEJ straty
+            # (endpoint nie daje PCM; 96k to maksimum jakości tego serwisu)
+            final = mp3 if fmt == 'mp3' else _convert(mp3, fmt)
+    except PiperBlad as e:
+        print(f'BŁĄD: {e}', file=sys.stderr, flush=True)
+        sys.exit(2)
     finally:
         try:
             PROGRESS_FILE.unlink()
