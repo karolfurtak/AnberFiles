@@ -69,6 +69,31 @@ def _link_startowy() -> str:
             f'🏠 {_esc(KONF.nazwa_instancji)}</a>')
 
 
+def _link_kolejki() -> str:
+    """Przycisk „🔊 kolejka lektora” z licznikiem zadań (02.10 Karol: „Tu też
+    potrzebny jest przycisk lektor, aby zobaczyć stan kolejki”). Tylko instancja
+    ze stroną startową (Jarvis) i włączonym lektorem; licznik odświeżany co 5 s."""
+    if KONF is None or not KONF.modul('lektor') or not _link_startowy():
+        return ''
+    n = sum(1 for j in _LEKTOR_QUEUE if not j['cancelled'] and j['state'] != 'failed')
+    return ('<a class="af-kolejka" href="/?lektorq=1" target="_top" '
+            'title="Kolejka lektora — postęp na żywo, pauza, usuwanie" '
+            'style="display:inline-block;font:600 1rem/1.2 system-ui,sans-serif;'
+            'padding:.4em .8em;margin:.15em .3em;border-radius:8px;border:1px solid #4a5160;'
+            'background:#2b3240;color:#fff;text-decoration:none;white-space:nowrap">'
+            '🔊 kolejka lektora<span class="af-kl-n">' + (f' · {n}' if n else '') + '</span></a>'
+            '<script>(function(){const a=document.currentScript.previousElementSibling;'
+            'async function t(){try{const d=await(await fetch("/?lektorqj=1",'
+            '{cache:"no-store"})).json();const n=(d.jobs||[]).length;'
+            'a.querySelector(".af-kl-n").textContent=n?" · "+n:"";}catch(e){}}'
+            'setInterval(t,5000);})();</script>')
+
+
+def _przyciski() -> str:
+    """Przyciski nagłówka każdego widoku: 🏠 strona startowa + 🔊 kolejka lektora."""
+    return _link_startowy() + _link_kolejki()
+
+
 def _json_do_script(obj) -> str:
     """JSON bezpieczny wewnątrz <script>…</script>: „<" jako \\u003c (nie da się
     zamknąć znacznika ani otworzyć komentarza <!--), U+2028/U+2029 jako ucieczki
@@ -477,7 +502,7 @@ def render_read_page(target: Path, audio: Path, cues_path: Path) -> str:
         '.s.cur{background:#1a5fb4;color:#fff}'
         '</style>'
         '<div class="hd"><div class="bar">'
-        f'<a href="./">📁 folder</a>{_link_startowy()}'
+        f'<a href="./">📁 folder</a>{_przyciski()}'
         f'<a href="{dq}?view=1">📘 podgląd</a>'
         f'<span style="word-break:break-all">{_html.escape(target.name)}</span>'
         f'<span style="color:#6fce8f;margin-left:auto">📖 {n_zdan} zdań</span>'
@@ -548,7 +573,7 @@ def render_3d_page(target: Path) -> str:
         '#hint{position:fixed;bottom:.35em;left:0;right:0;text-align:center;'
         'color:#566270;font-size:.78em;pointer-events:none}'
         'canvas{display:block;touch-action:none}</style>'
-        f'<div class="bar"><a href="./">📁</a>{_link_startowy()}'
+        f'<div class="bar"><a href="./">📁</a>{_przyciski()}'
         '<button id="bfit">⤢ Dopasuj</button>'
         '<button id="b11">1:1</button>'
         '<button id="bzi">＋</button>'
@@ -674,7 +699,7 @@ def render_audio_page(target: Path) -> str:
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>♪ {_esc(target.name)}</title><style>{AUDIO_STYLE}</style>'
-        f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}{a_prev}{a_next}'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}{a_prev}{a_next}'
         f'<span id="cnt" style="color:#8a93a0">{idx + 1} / {len(sibs)}</span>'
         f'<a href="{q}?dl=1">⬇ pobierz</a></div>'
         f'<div class="wrap"><div class="tname">🎵 {_esc(target.name)}</div>'
@@ -937,7 +962,7 @@ def render_csv_page(target: Path) -> str:
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>▦ {_esc(target.name)}</title><style>{TABLE_STYLE}</style>'
-        f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}{a_prev}{a_next}'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}{a_prev}{a_next}'
         f'<span class="name">{_html.escape(target.name)}</span>'
         f'<span class="cnt">{idx + 1} / {len(sibs)}</span>'
         f'<a class="sp" href="{q}?dl=1">⬇ pobierz</a></div>'
@@ -980,7 +1005,7 @@ def render_xlsx_page(target: Path) -> str:
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>▦ {_esc(target.name)}</title><style>{TABLE_STYLE}</style>'
-        f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}{a_prev}{a_next}'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}{a_prev}{a_next}'
         f'<span class="name">{_html.escape(target.name)}</span>'
         f'<span class="cnt">{idx + 1} / {len(sibs)}</span>'
         f'<span id="info" style="color:#7b8694"></span>'
@@ -1309,7 +1334,7 @@ def render_video_page(target: Path) -> str:
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>🎬 {_esc(target.name)}</title><style>{VIDEO_STYLE}</style>'
-        f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}{a_prev}{a_next}'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}{a_prev}{a_next}'
         f'<span class="name">{_esc(target.name)}</span>'
         f'<span class="cnt">{idx + 1} / {len(sibs)}</span>'
         f'<span class="cnt" id="fps" title="Klatki na sekundę (z odtwarzania)">FPS: –</span>'
@@ -1420,7 +1445,7 @@ def render_md_page(target: Path) -> str:
         '<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/'
         'tex-mml-chtml.js"></script>'
         '<div class="stickyhead">'
-        f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}{a_prev}{a_next}'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}{a_prev}{a_next}'
         f'<button id="bren" class="on">Render</button>'
         f'<button id="braw">Kod</button>'
         f'<button id="zout" title="Mniejszy tekst (Ctrl - / Ctrl+scroll)">A−</button>'
@@ -2604,7 +2629,7 @@ def render_events_page():
         'vertical-align:top}td.t{white-space:nowrap;color:#8a93a0}'
         'th{position:sticky;top:0;background:#1d2027;text-align:left;'
         'padding:.4em .7em}</style>'
-        f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}'
         '<b>Rejestr zdarzeń i błędów</b>'
         + _pamiec_html() +
         '<span style="color:#8a93a0;margin-left:auto">'
@@ -2681,7 +2706,7 @@ def render_explorer_page(start_url='/'):
         '.pane.act{border-left-color:#1a5fb4}.pane .ph{font-size:.8em;'
         'padding:.2em .5em;background:#2b2f37;color:#9fb;cursor:pointer}'
         '.pane iframe{flex:1;width:100%;border:0}#paneB{display:none}</style>'
-        '<div class="tb">' + _link_startowy() + '<a href="' + su + '">← powrót</a>'
+        '<div class="tb">' + _przyciski() + '<a href="' + su + '">← powrót</a>'
         '<button id="bt" class="on" onclick="ht()">☰ drzewo</button>'
         '<button id="bb" onclick="tpb()">⧉ druga karta</button>'
         '<span style="margin-left:.5em">ładuj do:</span>'
@@ -2932,7 +2957,7 @@ def _strona_katalogu_niedostepnego(raw, status, tytul, przyczyna=''):
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>Katalog niedostępny — AnberFiles</title>'
             '<body style="font-family:system-ui,sans-serif;margin:1.5em">'
-            f'<div>{_link_startowy()}</div>'
+            f'<div>{_przyciski()}</div>'
             f'<h2>{_html.escape(tytul)}</h2>{szczegol}'
             f'<p><a href="{_html.escape(rodzic_url)}">↑ katalog nadrzędny</a></p>')
     return web.Response(status=status, text=html, content_type='text/html',
@@ -3146,7 +3171,7 @@ async def serve(request):
             FAVICON_LINK,
             f'<title>{_esc(rel_url)}</title>',
             f'<style>{STYLE}</style>',
-            (f'<div>{_link_startowy()}</div>' if _link_startowy() else ''),
+            (f'<div>{_przyciski()}</div>' if _link_startowy() else ''),
             f'<h2>{breadcrumb}</h2>',
             f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
             f'⟳ auto-odświeżanie'
@@ -4948,7 +4973,7 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<title>Do przesłuchania ({lic["decyzja"]})</title><style>{PRZ_STYLE}</style>'
-        f'<div class="hd"><div class="bar">{_link_startowy()}'
+        f'<div class="hd"><div class="bar">{_przyciski()}'
         '<a href="/">📁 pliki</a>'
         '<a href="/?przesluchania=1&odswiez=1" title="Wczytaj vault od nowa">🔄</a>'
         f'<span style="font-weight:600">Do przesłuchania</span>'
@@ -5067,7 +5092,7 @@ def render_sluchaj_page(target: Path, wiersz: dict) -> str:
         f'<title>{_esc(wiersz["tytul"])}</title><style>{SLUCHAJ_STYLE}</style>'
         '<div class="hd"><div class="bar">'
         '<a href="/?przesluchania=1">📋 lista</a>'
-        f'{_link_startowy()}<a href="{q}?view=1">📘 podgląd</a>'
+        f'{_przyciski()}<a href="{q}?view=1">📘 podgląd</a>'
         '<a href="#dec" title="Przewiń do decyzji">⬇ decyzja</a>'
         + _lektor_przycisk(target, aud) +
         f'<span style="color:#6fce8f;font-size:.85em">{opis}</span></div>'
@@ -5230,7 +5255,7 @@ async def _serve_file(request, target):
             'justify-content:center;color:#cfd6df;font-family:system-ui,'
             'sans-serif;text-align:center;padding:1em;font-size:1.05em}'
             '#cvt.hide{display:none}</style>'
-            f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}'
+            f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}'
             f'<span style="word-break:break-all">{_esc(target.name)}</span>'
             f'<span id="st" style="color:#8a93a0"></span>'
             + (f'<a href="{q}?read=1" style="color:#6fce8f;'
@@ -5298,7 +5323,7 @@ async def _serve_file(request, target):
             '<!doctype html><meta charset=utf-8>'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{_esc(target.name)}</title><style>{VIEWER_STYLE}</style>'
-            f'<div class="bar"><a href="./">📁 folder</a>{_link_startowy()}{a_prev}{a_next}'
+            f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}{a_prev}{a_next}'
             f'<span class="name">{_esc(target.name)}</span>'
             f'<span class="cnt">{idx+1} / {len(names)}</span>'
             f'<span class="cnt" id="zl">100%</span>'

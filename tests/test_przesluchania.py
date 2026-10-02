@@ -399,6 +399,7 @@ def test_przycisk_strony_startowej_na_liscie_i_w_widoku_sluchania(tmp_path, auth
         return lista, sluchaj
     for html in uruchom(k, sc):
         assert 'class="af-start"' in html and f'href="{ORIGIN_STARTOWA}/"' in html
+        assert 'class="af-kolejka" href="/?lektorq=1"' in html     # 🔊 kolejka lektora obok
 
 
 def test_widok_sluchania_po_odswiezeniu_pokazuje_postep(tmp_path, auth, monkeypatch):

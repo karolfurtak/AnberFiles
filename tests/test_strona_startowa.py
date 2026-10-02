@@ -97,3 +97,48 @@ def test_obcy_schemat_to_blad_ustawien(tmp_path, zly):
     import konfiguracja
     with pytest.raises(konfiguracja.BladKonfiguracji, match='strona_startowa'):
         wczytaj(zbuduj_jarvis(tmp_path, strona_startowa=zly))
+
+
+# ── przycisk „🔊 kolejka lektora” obok 🏠 (Karol 02.10: „Tu też potrzebny jest
+# przycisk lektor, aby zobaczyć stan kolejki”) ─────────────────────────────
+
+def test_przycisk_kolejki_lektora_z_licznikiem_na_kazdym_widoku(tmp_path, auth):
+    import server
+    _tresc(tmp_path)
+    k = wczytaj(zbuduj_jarvis(tmp_path, logowanie='basic', strona_startowa=ADRES))
+    assert k.tylko_odczyt
+
+    async def sc(cl):
+        out = {}
+        for nazwa, url in (('lista', '/proj/'), ('md', '/proj/a.md?view=1'),
+                           ('csv', '/proj/b.csv?view=1'), ('drzewo', '/?explorer=1'),
+                           ('zdarzenia', '/?events=1')):
+            out[nazwa] = await (await cl.get(url, auth=auth)).text()
+        server._LEKTOR_QUEUE.append({'id': 1, 'out': 'x', 'src': 'x', 'plik': 'x',
+                                     'fmt': 'mp3', 'state': 'running', 'cancelled': False})
+        server._LEKTOR_QUEUE.append({'id': 2, 'out': 'y', 'src': 'y', 'plik': 'y',
+                                     'fmt': 'mp3', 'state': 'queued', 'cancelled': False})
+        try:
+            out['z_kolejka'] = await (await cl.get('/proj/a.md?view=1', auth=auth)).text()
+        finally:
+            server._LEKTOR_QUEUE.clear()
+        kol = await cl.get('/?lektorq=1', auth=auth)       # widok kolejki: vault tylko do odczytu
+        out['kolejka'] = (kol.status, await kol.text())
+        kj = await cl.get('/?lektorqj=1', auth=auth)
+        out['kolejka_json'] = kj.status
+        return out
+    out = uruchom(k, sc)
+    for nazwa in ('lista', 'md', 'csv', 'drzewo', 'zdarzenia'):
+        assert 'class="af-kolejka" href="/?lektorq=1"' in out[nazwa], nazwa
+        assert '<span class="af-kl-n"></span>' in out[nazwa], nazwa   # pusta kolejka: bez liczby
+    assert '🔊 kolejka lektora<span class="af-kl-n"> · 2</span>' in out['z_kolejka']
+    st, html = out['kolejka']
+    assert st == 200 and out['kolejka_json'] == 200
+    assert 'af-kolejka' not in html and PRZYCISK in html          # sam widok kolejki: tylko 🏠
+
+
+def test_bez_strony_startowej_bez_przycisku_kolejki(tmp_path, auth):
+    _tresc(tmp_path)
+    k = wczytaj(zbuduj_jarvis(tmp_path, logowanie='basic'))
+    for nazwa, html in _strony(k, auth).items():
+        assert 'af-kolejka' not in html, nazwa
