@@ -12,8 +12,6 @@ import json
 import os
 import time
 
-import pytest
-
 from conftest import czekaj_na_lektora, uruchom, wczytaj
 from conftest import zbuduj_jarvis as _zbuduj_jarvis
 
@@ -28,22 +26,6 @@ def zbuduj_jarvis(tmp_path, **nadpisz):
     nadpisz.setdefault('logowanie', 'basic')
     nadpisz.setdefault('lektor_auto_odswiezanie', 'tak')
     return _zbuduj_jarvis(tmp_path, **nadpisz)
-
-
-@pytest.fixture
-def puls(monkeypatch):
-    """Podstawiony Puls: stan['bieg'] = True → trwający bieg."""
-    import server
-    stan = {'bieg': False, 'zapytania': 0}
-
-    def status():
-        stan['zapytania'] += 1
-        return {'current_run': {'id': 1} if stan['bieg'] else None,
-                'current_runs': [1] if stan['bieg'] else []}
-    monkeypatch.setattr(server, '_puls_status', status)
-    monkeypatch.setattr(server, 'ODSW_CZEKAJ_S', 0.05)
-    monkeypatch.setattr(server, 'ODSW_CO_S', 3600)       # przegląd startowy + ręczne wywołania
-    return stan
 
 
 def _korzen(tmp_path):
@@ -302,7 +284,7 @@ def test_domyslnie_wylaczone(tmp_path, auth, puls):
     _dokument(tmp_path, NOWY)
     _nagranie(tmp_path, STARY)
     k = wczytaj(zbuduj_jarvis(tmp_path, lektor_auto_odswiezanie='nie'))
-    assert k.lektor_auto_odswiezanie is False
+    assert k.lektor_auto_odswiezanie == 'nie'
 
     async def sc(cl):
         import server
@@ -314,7 +296,7 @@ def test_domyslnie_wylaczone(tmp_path, auth, puls):
 
 def test_anbernic_domyslnie_nie():
     import konfiguracja
-    assert konfiguracja.domyslna().lektor_auto_odswiezanie is False
+    assert konfiguracja.domyslna().lektor_auto_odswiezanie == 'nie'
 
 
 def test_puls_zajety_z_odpowiedzi_api_status():

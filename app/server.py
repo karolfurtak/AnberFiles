@@ -1849,6 +1849,57 @@ LEKTOR_PODGLAD_JS = (
 )
 
 
+# 02.10 (Karol: „C — nocą plus przycisk »nagraj teraz«”): tryb nocą — nagranie
+# nieaktualne czeka na przebieg nocny, w dzień przycisk zleca je ręcznie
+# (pierwszeństwo jak inne ręczne; ten sam format i głos co stare nagranie).
+NAGRAJ_TERAZ_JS = (
+    '<script>' + JS_ZAPIS + '(function(){if(window._NTJ)return;window._NTJ=1;'
+    'document.addEventListener("click",async e=>{'
+    'const b=e.target.closest(".nagrajteraz");if(!b)return;e.preventDefault();'
+    'if(b.disabled)return;b.disabled=true;b.textContent="⏳ zlecam…";'
+    'try{const r=await afFetch(b.dataset.u,{method:"POST"});'
+    'const j=await r.json().catch(()=>({}));'
+    'if(r.status===202||j.status==="duplikat"){b.textContent="✓ zlecone";'
+    'setTimeout(()=>location.reload(),600);}'
+    'else{b.textContent="❌ "+(j.blad||j.status||("HTTP "+r.status));b.disabled=false;}}'
+    'catch(err){b.textContent="❌ brak połączenia";b.disabled=false;}});})();</script>'
+)
+
+
+def _odsw_napis_nocny() -> str:
+    return f'⚠ nagranie nieaktualne — nowe nocą o {_gg_mm(KONF.lektor_godzina_nocna)}'
+
+
+def _odsw_teraz_url(target: Path, url: str):
+    """Tryb nocą, nagranie nieaktualne i bez zadania w kolejce → adres zlecenia
+    „nagraj teraz” (ten sam format i głos co stare nagranie); inaczej None."""
+    if _odsw_tryb() != 'noca' or not _odsw_nieaktualne(target):
+        return None
+    if _lektor_zadanie_pliku(target.resolve()) is not None:
+        return None
+    aud = _lektor_audio_for(target, exports=True)
+    if aud is None:
+        return None
+    fmt = aud.suffix.lower().lstrip('.')
+    if fmt not in ('mp3', 'wav', 'flac'):
+        fmt = 'mp3'
+    silnik = (_odsw.czytaj_metryke(aud) or {}).get('silnik')
+    if silnik not in LEKTOR_SILNIKI:
+        silnik = 'piper'
+    return f'{url}?lektor=1&queue=1&teraz=1&opisy=nie&fmt={fmt}&silnik={silnik}'
+
+
+def _odsw_teraz_html(target: Path, url: str) -> str:
+    u = _odsw_teraz_url(target, url)
+    if u is None:
+        return ''
+    return (f'<span class="odsw-nieakt" style="color:#e0a33a;font-size:.9em">'
+            f'{_esc(_odsw_napis_nocny())}</span>'
+            f'<button class="nagrajteraz" data-u="{_esc(u)}" title="Nowe nagranie '
+            'teraz, bez czekania na noc (ten sam format i głos)">🔄 nagraj teraz</button>'
+            + NAGRAJ_TERAZ_JS)
+
+
 def _lektor_przycisk(target: Path, aud) -> str:
     """Przycisk 🔊 lektora do paska podglądu dokumentu + skrypt; pusty, gdy
     moduł lektora wyłączony. Domyślny silnik i napis o edge z
@@ -1873,7 +1924,7 @@ def _lektor_przycisk(target: Path, aud) -> str:
             f'<script>window._LEK_SILNIK={_json_do_script(_lektor_silnik())};'
             + ('' if KONF.modul('lektor_opisy_ai') else 'window._LEK_OPISY=false;')
             + '</script>' + _lektor_uwaga_js() + LEKTOR_PODGLAD_JS
-            + _lektor_usun_html(aud))
+            + _lektor_usun_html(aud) + _odsw_teraz_html(target, q))
 
 
 # Drag & drop upload — upuszczenie plików na listing wgrywa je do bieżącego
@@ -3307,7 +3358,8 @@ def _lektor_save_queue():
             'shutdown': _LEKTOR_SHUTDOWN,
             'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt'],
                       'opisy': j.get('opisy', ''), 'silnik': j.get('silnik', ''),
-                      'plik': j.get('plik', j['src']), 'auto': bool(j.get('auto'))}
+                      'plik': j.get('plik', j['src']), 'auto': bool(j.get('auto')),
+                      'do': j.get('do')}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
             ensure_ascii=False))
     except Exception:
@@ -3338,13 +3390,15 @@ async def _lektor_restore(app):
             continue   # już generowane przez osierocony/zewnętrzny proces
         _lektor_new_job(it['src'], Path(it['out']), it['fmt'],
                         it.get('opisy', ''), it.get('silnik', ''), it.get('plik'),
-                        auto=bool(it.get('auto')))
+                        auto=bool(it.get('auto')), do=it.get('do'))
 
 
-def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None, auto=False) -> dict:
+def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None, auto=False,
+                    do=None) -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
     do następnego" przy pauzie). auto=True: odświeżenie po zmianie dokumentu
-    (ustępuje zleconym ręcznie, czeka na koniec biegu Pulsa)."""
+    (ustępuje zleconym ręcznie, czeka na koniec biegu Pulsa). do: znacznik
+    czasu końca okna nocnego — po nim zadanie nie zaczyna się wcale."""
     global _LEKTOR_SEQ, _LEKTOR_LOCK
     if _LEKTOR_LOCK is None:
         _LEKTOR_LOCK = asyncio.Lock()
@@ -3354,6 +3408,8 @@ def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None, auto=False) -
            'opisy': opisy, 'silnik': silnik, 'state': 'queued', 'cancelled': False,
            'proc': None, 'started': _t.time(), 'plik': str(plik or src),
            'auto': bool(auto)}
+    if do:
+        job['do'] = float(do)
     _LEKTOR_QUEUE.append(job)
     _lektor_save_queue()
     asyncio.ensure_future(_lektor_run(job))
@@ -3457,6 +3513,57 @@ PULS_LIMIT_S = 3.0
 _ODSW_PAMIEC: dict = {}     # odswiezanie.przeglad: stan dokumentów między przeglądami
 _ODSW_ZADANIE = None
 _ODSW_PULS_BLAD = {'zgloszony': False}
+# przebieg nocny (tryb „nocą”): początek okna, w którym już był, i jego bilans
+_ODSW_NOC: dict = {'klucz': None, 'zadania': set(), 'zlecone': 0, 'nagrane': 0,
+                   'przeniesione': 0}
+_ODSW_OZNACZONE: set = set()  # (dokument, odcisk) już zapisane w rejestrze jako nieaktualne
+
+
+def _zegar() -> datetime:
+    """Czas urządzenia (lokalny — strefa z timedatectl); testy podstawiają sztuczny."""
+    return datetime.now()
+
+
+def _odsw_tryb() -> str:
+    """'nie' | 'natychmiast' | 'noca' — z ustawień, gdy lektor ma katalog nagrań."""
+    if not (KONF.modul('lektor') and KONF.katalog_lektora is not None):
+        return 'nie'
+    return KONF.lektor_auto_odswiezanie or 'nie'
+
+
+def _gg_mm(t: tuple) -> str:
+    return f'{t[0]:02d}:{t[1]:02d}'
+
+
+def _odsw_okno_nocne(teraz: datetime):
+    """(początek, koniec) okna nocnego, w którym jest teraz, albo None. Okno
+    przechodzące przez północ (np. 23:00–06:30) liczone od dnia początku."""
+    import datetime as _dt
+    g, m = KONF.lektor_godzina_nocna
+    g2, m2 = KONF.lektor_nocne_okno_do
+    for dzien in (teraz.date(), teraz.date() - _dt.timedelta(days=1)):
+        pocz = datetime.combine(dzien, _dt.time(g, m))
+        kon = datetime.combine(dzien, _dt.time(g2, m2))
+        if kon <= pocz:
+            kon += _dt.timedelta(days=1)
+        if pocz <= teraz < kon:
+            return pocz, kon
+    return None
+
+
+def _odsw_po_oknie(job: dict) -> bool:
+    """Zadanie przebiegu nocnego, którego okno już się zamknęło."""
+    return bool(job.get('do')) and _zegar().timestamp() >= job['do']
+
+
+def _odsw_przenies(job: dict):
+    """Okno nocne zamknięte przed startem: zadanie wypada z kolejki, nagranie
+    zostaje nieaktualne i trafi do przebiegu kolejnej nocy."""
+    job['cancelled'] = True
+    _ODSW_NOC['przeniesione'] += 1
+    _evlog('lektor', f'okno nocne zamknięte ({_gg_mm(KONF.lektor_nocne_okno_do)}): '
+           f'{_rel_root(Path(job.get("plik", job["src"])))} nie rozpoczęte — '
+           'przechodzi na kolejną noc')
 
 
 def _puls_status() -> dict:
@@ -3503,6 +3610,9 @@ async def _odsw_czekaj(job: dict) -> bool:
     while True:
         if job['cancelled']:
             return False
+        if _odsw_po_oknie(job):
+            _odsw_przenies(job)
+            return False
         powod = await _odsw_powod_czekania(job)
         if powod is None:
             job.pop('czeka', None)
@@ -3526,26 +3636,98 @@ def _lektor_po_nagraniu(job: dict):
         _evlog('lektor', f'metryka nagrania {out.name} nie zapisana: {e} — nagranie '
                'nie będzie odświeżane po zmianie dokumentu', level='error')
     _ODSW_PAMIEC.pop(str(plik), None)
+    if job.get('do'):
+        _ODSW_NOC['nagrane'] += 1
     if job.get('auto'):
         _evlog('lektor', f'nagranie odświeżone: {_rel_root(plik)} (zmiana treści, '
-               f'odcisk {str(job.get("odcisk"))[:12]})')
+               f'odcisk {str(job.get("odcisk"))[:12]}'
+               + (', przebieg nocny)' if job.get('do') else ')'))
+    elif job.get('teraz'):
+        _evlog('lektor', f'nagranie odświeżone przyciskiem „nagraj teraz”: '
+               f'{_rel_root(plik)} (odcisk {str(job.get("odcisk"))[:12]})')
 
 
 def _odsw_nieaktualne(plik: Path) -> bool:
-    w = _ODSW_PAMIEC.get(str(Path(plik)))
+    plik = Path(plik)
+    w = _ODSW_PAMIEC.get(str(plik))
+    if w is None:
+        try:
+            w = _ODSW_PAMIEC.get(str(plik.resolve()))
+        except OSError:
+            w = None
     return bool(w and w.get('nieaktualne'))
 
 
 def odswiez_nagrania() -> list:
-    """Jeden przegląd: nieaktualne nagrania → zadania automatyczne w kolejce
-    (bez dublowania). Zwraca listę dodanych zadań. Wywołanie w pętli zdarzeń."""
-    if not (KONF.lektor_auto_odswiezanie and KONF.modul('lektor')
-            and KONF.katalog_lektora is not None):
+    """Jeden krok: przegląd + działanie wg trybu (natychmiast: zlecenie od
+    razu; nocą: oznaczenie, a w oknie nocnym jeden przebieg zlecający). Zwraca
+    listę dodanych zadań. Wywołanie w pętli zdarzeń."""
+    if _odsw_tryb() == 'nie':
         return []
-    return _odsw_kolejkuj(_odsw.przeglad(Path(KONF.katalog_lektora), ROOT, _ODSW_PAMIEC))
+    return _odsw_krok(_odsw.przeglad(Path(KONF.katalog_lektora), ROOT, _ODSW_PAMIEC))
 
 
-def _odsw_kolejkuj(nieaktualne: list) -> list:
+def _odsw_krok(nieaktualne: list) -> list:
+    tryb = _odsw_tryb()
+    if tryb == 'natychmiast':
+        return _odsw_kolejkuj(nieaktualne)
+    if tryb != 'noca':
+        return []
+    _odsw_oznacz(nieaktualne)
+    _odsw_noc_bilans()
+    return _odsw_noc(nieaktualne, _zegar())
+
+
+def _odsw_oznacz(nieaktualne: list):
+    """Tryb nocą: nowo wykryta zmiana = wpis w rejestrze (raz na odcisk), bez zlecania."""
+    for n in nieaktualne:
+        klucz = (str(n['plik']), n['nowy'])
+        if klucz in _ODSW_OZNACZONE:
+            continue
+        _ODSW_OZNACZONE.add(klucz)
+        _evlog('lektor', f'nagranie nieaktualne: {_rel_root(Path(n["plik"]))} ({n["powod"]}; '
+               f'odcisk {(n.get("stary") or "brak")[:12]} → {n["nowy"][:12]}) — stare '
+               f'nagranie do odtworzenia, nowe nocą o {_gg_mm(KONF.lektor_godzina_nocna)} '
+               'albo przyciskiem „🔄 nagraj teraz”')
+
+
+def _odsw_noc(nieaktualne: list, teraz: datetime) -> list:
+    """Przebieg nocny: raz na okno (od lektor_godzina_nocna do
+    lektor_nocne_okno_do) wszystkie nieaktualne nagrania do kolejki."""
+    okno = _odsw_okno_nocne(teraz)
+    if okno is None:
+        return []
+    pocz, kon = okno
+    if _ODSW_NOC['klucz'] == pocz:
+        return []
+    w_kolejce = sum(1 for n in nieaktualne
+                    if _lektor_zadanie_pliku(Path(n['plik']), Path(n['audio'])) is not None
+                    or _lektor_zadanie_pliku(Path(n['plik']).resolve(),
+                                             Path(n['audio'])) is not None)
+    dodane = _odsw_kolejkuj(nieaktualne, do=kon.timestamp())
+    _ODSW_NOC.update(klucz=pocz, zadania={j['id'] for j in dodane}, zlecone=len(dodane),
+                     nagrane=0, przeniesione=0)
+    _evlog('lektor', f'przebieg nocny {pocz:%Y-%m-%d} {pocz:%H:%M} (nowych nagrań nie '
+           f'zaczyna od {kon:%H:%M}): nieaktualnych {len(nieaktualne)}, zleconych '
+           f'{len(dodane)}, już w kolejce {w_kolejce}, pominiętych '
+           f'{len(nieaktualne) - len(dodane) - w_kolejce}')
+    return dodane
+
+
+def _odsw_noc_bilans():
+    """Gdy żadne zadanie przebiegu nocnego nie zostało w kolejce — wpis z bilansem."""
+    ids = _ODSW_NOC['zadania']
+    if not ids or any(j['id'] in ids for j in _LEKTOR_QUEUE):
+        return
+    n = _ODSW_NOC
+    nieudane = max(0, n['zlecone'] - n['nagrane'] - n['przeniesione'])
+    _evlog('lektor', f'przebieg nocny {n["klucz"]:%Y-%m-%d} zakończony: zleconych '
+           f'{n["zlecone"]}, nagranych {n["nagrane"]}, przeniesionych na kolejną noc '
+           f'{n["przeniesione"]}, nieudanych {nieudane}')
+    n['zadania'] = set()
+
+
+def _odsw_kolejkuj(nieaktualne: list, do=None) -> list:
     dodane = []
     for n in nieaktualne:
         plik, audio = Path(n['plik']), Path(n['audio'])
@@ -3565,7 +3747,12 @@ def _odsw_kolejkuj(nieaktualne: list) -> list:
             fmt = 'mp3'
         silnik = n.get('silnik') if n.get('silnik') in LEKTOR_SILNIKI else 'piper'
         job = _lektor_new_job(src, audio.with_suffix('.' + fmt), fmt, 'nie', silnik,
-                              plik=plik, auto=True)
+                              plik=plik, auto=True, do=do)
+        if do:
+            _evlog('lektor', f'przebieg nocny: {_rel_root(plik)} do kolejki (silnik '
+                   f'{silnik}, zadanie {job["id"]})')
+            dodane.append(job)
+            continue
         _evlog('lektor', f'nagranie nieaktualne: {_rel_root(plik)} ({n["powod"]}; odcisk '
                f'{(n.get("stary") or "brak")[:12]} → {n["nowy"][:12]}) — stare nagranie '
                f'zostaje do czasu zastąpienia, nowe w kolejce (silnik {silnik}, '
@@ -3580,7 +3767,7 @@ async def _odsw_petla():
         try:
             nieakt = await loop.run_in_executor(
                 None, _odsw.przeglad, Path(KONF.katalog_lektora), ROOT, _ODSW_PAMIEC)
-            _odsw_kolejkuj(nieakt)
+            _odsw_krok(nieakt)
         except Exception as e:                      # pętla nie może umrzeć po cichu
             _evlog('lektor', f'przegląd nagrań do odświeżenia: {e}', level='error')
         await asyncio.sleep(ODSW_CO_S)
@@ -3589,8 +3776,19 @@ async def _odsw_petla():
 async def _odsw_start(app):
     global _ODSW_ZADANIE
     _ODSW_PAMIEC.clear()
-    if (KONF.lektor_auto_odswiezanie and KONF.modul('lektor')
-            and KONF.katalog_lektora is not None):
+    _ODSW_OZNACZONE.clear()
+    _ODSW_NOC.update(klucz=None, zadania=set(), zlecone=0, nagrane=0, przeniesione=0)
+    tryb = _odsw_tryb()
+    if tryb == 'noca':
+        strefa = _zegar().astimezone().strftime('%Z, UTC%z')
+        _evlog('lektor', f'odświeżanie nagrań po zmianie dokumentu: tryb nocą — przebieg '
+               f'codziennie o {_gg_mm(KONF.lektor_godzina_nocna)}, nowych nagrań nie zaczyna '
+               f'od {_gg_mm(KONF.lektor_nocne_okno_do)} (czas urządzenia: {strefa}); '
+               'w dzień zmiana tylko oznacza nagranie, przycisk „🔄 nagraj teraz”')
+    elif tryb == 'natychmiast':
+        _evlog('lektor', 'odświeżanie nagrań po zmianie dokumentu: tryb natychmiast — '
+               'zlecenie zaraz po wykryciu zmiany')
+    if tryb != 'nie':
         _ODSW_ZADANIE = asyncio.ensure_future(_odsw_petla())
 
 
@@ -3629,6 +3827,9 @@ async def _lektor_run(job: dict):
                 await asyncio.sleep(5)
                 if job['cancelled']:
                     return
+            if _odsw_po_oknie(job):          # okno nocne zamknięte — nie zaczynaj
+                _odsw_przenies(job)
+                return
             job['state'] = 'running'
             job.pop('czeka', None)
             import time as _t
@@ -4275,6 +4476,8 @@ async def lektor_item(request):
     if silnik not in LEKTOR_SILNIKI:
         silnik = ''
     job = _lektor_new_job(src, out, fmt, opisy, silnik, plik=target)
+    if request.query.get('teraz') == '1':
+        job['teraz'] = True
     return web.json_response(
         {'status': 'queued' if queued else 'start', 'id': job['id'],
          'out': out.name, 'position': len(_LEKTOR_QUEUE)}, status=202)
@@ -4932,11 +5135,16 @@ def _prz_stan_nagrania(w: dict, prog) -> dict:
             zostalo = _nagr.opis_pozostalo(_nagr.pozostalo_s(aud, KONF.wiek_nagran_dni))
         except OSError:
             zostalo = ''
+        teraz = _odsw_teraz_url(plik, w['url']) if w.get('url') else None
+        nieakt = ''
+        if teraz is not None:
+            nieakt = ' · ' + _odsw_napis_nocny()
+        elif _odsw_nieaktualne(plik):
+            nieakt = ' · ⚠ nieaktualne (dokument zmieniony)'
         return {'rodzaj': 'gotowe',
                 'napis': '🔊 gotowe' + (f' · {czas}' if czas else '')
-                         + (f' · zniknie za {zostalo}' if zostalo else '')
-                         + (' · ⚠ nieaktualne (dokument zmieniony)'
-                            if _odsw_nieaktualne(plik) else '')}
+                         + (f' · zniknie za {zostalo}' if zostalo else '') + nieakt,
+                'teraz': teraz}
     rel = _rel_root(plik)
     bl = next((b for b in reversed(_LEKTOR_BLEDY) if b.get('plik') == rel), None)
     if bl is not None:
@@ -5226,6 +5434,8 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
                    + (f'<button class="gen" data-u="{w["url"]}" '
                       f'data-n="{_esc(Path(w["plik"]).name)}">🔊 generuj</button>'
                       if sn['rodzaj'] in ('brak', 'blad') else '')
+                   + (f'<button class="nagrajteraz" data-u="{_esc(sn["teraz"])}">'
+                      '🔄 nagraj teraz</button>' if sn.get('teraz') else '')
                    + '</div>')
         opis = ''
         if w.get('do_wdrozenia'):
@@ -5273,7 +5483,7 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
         'body:JSON.stringify({tylko_nagrane:!tn.classList.contains("on")})});}'
         'catch(e){}location.reload();};'
         '})();</script>'
-        + (PRZ_LEKTOR_JS if lektor_on else ''))
+        + (PRZ_LEKTOR_JS + NAGRAJ_TERAZ_JS if lektor_on else ''))
 
 
 def _zdania_lektora(cues_path: Path):
@@ -5359,7 +5569,7 @@ def render_sluchaj_page(target: Path, wiersz: dict) -> str:
     zad = _lektor_zadanie_pliku(target.resolve()) if aud is not None else None
     if zad is not None and zad.get('auto'):
         opis = '⚠ nagranie nieaktualne — nowe w przygotowaniu · ' + opis
-    elif aud is not None and _odsw_nieaktualne(target):
+    elif aud is not None and _odsw_nieaktualne(target) and _odsw_tryb() != 'noca':
         opis = '⚠ nagranie nieaktualne (dokument zmieniony) · ' + opis
     audio_html = (f'<audio id="au" controls preload="metadata" src="{_url_abs(aud)}"></audio>'
                   if aud is not None else '')

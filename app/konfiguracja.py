@@ -46,7 +46,8 @@ KLUCZE = {
                'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci',
                'limit_druku_na_godzine', 'strona_startowa',
                'limit_odczytu_katalogu_s', 'wiek_nagran_dni',
-               'lektor_auto_odswiezanie', 'puls_adres'),
+               'lektor_auto_odswiezanie', 'puls_adres',
+               'lektor_godzina_nocna', 'lektor_nocne_okno_do'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -114,8 +115,15 @@ class Konfiguracja:
     # (sprawdzenie co godzinę + przy starcie); 0 = nagrania nie wygasają
     wiek_nagran_dni: int = 0
     # nagrania lektora odświeżane samoczynnie po zmianie treści dokumentu (moduł
-    # odswiezanie); Anbernic: nie (domyślnie), Jarvis: tak
-    lektor_auto_odswiezanie: bool = False
+    # odswiezanie): 'nie' (Anbernic, domyślnie) | 'natychmiast' (zlecenie zaraz
+    # po wykryciu zmiany; dawne „tak”) | 'noca' (Jarvis od 02.10: zmiana tylko
+    # oznacza nagranie jako nieaktualne, zlecenie w przebiegu nocnym + przycisk
+    # „nagraj teraz”)
+    lektor_auto_odswiezanie: str = 'nie'
+    # przebieg nocny (tryb 'noca'): start o lektor_godzina_nocna, nowych nagrań
+    # nie zaczyna od lektor_nocne_okno_do — (godzina, minuta), czas urządzenia
+    lektor_godzina_nocna: tuple = (3, 0)
+    lektor_nocne_okno_do: tuple = (6, 30)
     # Puls (claude-cron) na tym samym urządzeniu: automatyczne nagrania czekają,
     # gdy ma trwający bieg; pusty = bez sprawdzania
     puls_adres: str = ''
@@ -251,6 +259,29 @@ def _tak_nie_auto(klucz: str, tekst: str) -> str:
                            'albo „auto"')
 
 
+def _tryb_odswiezania(tekst: str) -> str:
+    """lektor_auto_odswiezanie: nie | natychmiast | nocą. Dawne „tak” (przed
+    02.10) = natychmiast — stary plik ustawień działa jak dotąd."""
+    t = tekst.strip().lower()
+    if t in _NIE:
+        return 'nie'
+    if t in _TAK or t == 'natychmiast':
+        return 'natychmiast'
+    if t in ('nocą', 'noca', 'w nocy'):
+        return 'noca'
+    raise BladKonfiguracji(f'[serwer] lektor_auto_odswiezanie = {tekst!r}: dozwolone '
+                           '„nie", „natychmiast" (dawne „tak") albo „nocą"')
+
+
+def _godzina(klucz: str, tekst: str) -> tuple:
+    """„GG:MM” (24-godzinny) → (godzina, minuta)."""
+    m = re.fullmatch(r'(\d{1,2}):(\d{2})', tekst.strip())
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: wymagana godzina '
+                               'w zapisie 24-godzinnym GG:MM, np. 03:00')
+    return int(m.group(1)), int(m.group(2))
+
+
 def _hosty(tekst: str) -> tuple:
     """Lista nazw hostów (po przecinku lub spacji), małymi literami, bez kropki
     końcowej; wpis z kropką na początku zostaje sufiksem (np. .ts.net)."""
@@ -378,8 +409,11 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
             'limit_odczytu_katalogu_s', s.get('limit_odczytu_katalogu_s', '3')),
         bez_drzewa=_nazwy_katalogow('bez_drzewa', k.get('bez_drzewa', '')),
         wiek_nagran_dni=_nieujemna('wiek_nagran_dni', s.get('wiek_nagran_dni', '0')),
-        lektor_auto_odswiezanie=_bool('serwer', 'lektor_auto_odswiezanie',
-                                      s.get('lektor_auto_odswiezanie', 'nie')),
+        lektor_auto_odswiezanie=_tryb_odswiezania(s.get('lektor_auto_odswiezanie', 'nie')),
+        lektor_godzina_nocna=_godzina('lektor_godzina_nocna',
+                                      s.get('lektor_godzina_nocna', '03:00')),
+        lektor_nocne_okno_do=_godzina('lektor_nocne_okno_do',
+                                      s.get('lektor_nocne_okno_do', '06:30')),
         puls_adres=_adres_http('puls_adres', s.get('puls_adres', '')),
         przesluchania_zakres=(Path(k['przesluchania_zakres'])
                               if k.get('przesluchania_zakres') else None),

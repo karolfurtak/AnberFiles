@@ -143,3 +143,19 @@ async def czekaj_na_lektora(cl, auth, plik: Path = None, limit: float = 30.0):
 def auth():
     import aiohttp
     return aiohttp.BasicAuth('admin', HASLO)
+
+
+@pytest.fixture
+def puls(monkeypatch):
+    """Podstawiony Puls (testy odświeżania nagrań lektora): stan['bieg'] = True → trwający bieg."""
+    import server
+    stan = {'bieg': False, 'zapytania': 0}
+
+    def status():
+        stan['zapytania'] += 1
+        return {'current_run': {'id': 1} if stan['bieg'] else None,
+                'current_runs': [1] if stan['bieg'] else []}
+    monkeypatch.setattr(server, '_puls_status', status)
+    monkeypatch.setattr(server, 'ODSW_CZEKAJ_S', 0.05)
+    monkeypatch.setattr(server, 'ODSW_CO_S', 3600)       # przegląd startowy + ręczne wywołania
+    return stan

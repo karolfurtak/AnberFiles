@@ -82,13 +82,19 @@ ale serwuje dowolne drzewo katalogów.
 - **załącznik nieczytany**: linia `<!-- lektor: koniec -->` — od niej do końca pliku
   lektor nie czyta (szczegóły, źródła); podgląd pokazuje całość, widok słuchania —
   załącznik pod napisem „Dalej: załącznik — tylko do czytania”; brak znacznika = całość
-- **odświeżanie po zmianie dokumentu**: `lektor_auto_odswiezanie = tak` (`[serwer]`,
-  domyślnie nie; Jarvis: tak) — każde nagranie ma `<nazwa>_lektor.zrodlo.json`
-  (dokument, odcisk SHA-256 części czytanej bez nagłówka Obsidiana, silnik). Przy starcie
-  i co minutę serwer porównuje odcisk TYLKO dokumentów z nagraniem; inny → stare nagranie
-  „nieaktualne — nowe w przygotowaniu”, zadanie w kolejce tym samym silnikiem (bez
-  dublowania), wpis „nagranie odświeżone: … (zmiana treści)”. Zadania automatyczne
-  ustępują zleconym ręcznie i czekają, gdy Puls (`puls_adres`, `/api/status`) ma trwający bieg
+- **odświeżanie po zmianie dokumentu**: `lektor_auto_odswiezanie` (`[serwer]`):
+  `nie` (domyślnie, Anbernic) | `natychmiast` (dawne `tak`) | `nocą` (Jarvis). Każde nagranie
+  ma `<nazwa>_lektor.zrodlo.json` (dokument, odcisk SHA-256 części czytanej bez nagłówka
+  Obsidiana, silnik). Przy starcie i co minutę serwer porównuje odcisk TYLKO dokumentów
+  z nagraniem. `natychmiast`: inny odcisk → zadanie w kolejce od razu. `nocą`: inny odcisk
+  tylko oznacza nagranie („⚠ nagranie nieaktualne — nowe nocą o 03:00” i przycisk
+  „🔄 nagraj teraz” w podglądzie, widoku słuchania i na liście „Do przesłuchania”; stare
+  nagranie do odtworzenia); o `lektor_godzina_nocna` (03:00) jeden przebieg zleca wszystkie
+  nieaktualne, raz na dokument, tym samym głosem; od `lektor_nocne_okno_do` (06:30) nowych
+  nie zaczyna — pozostałe przechodzą na kolejną noc. Rejestr: ustawienie przy starcie,
+  „przebieg nocny … zleconych N”, „okno nocne zamknięte …”, bilans przebiegu. Zadania
+  automatyczne ustępują zleconym ręcznie i czekają, gdy Puls (`puls_adres`, `/api/status`)
+  ma trwający bieg; „nagraj teraz” to zlecenie ręczne (nie czeka)
 
 **Lista „Do przesłuchania” (moduł `przesluchania`, domyślnie wyłączony):**
 - `/?przesluchania=1` — notatki `.md` z `przesluchania_zakres` ze `status:` w nagłówku
