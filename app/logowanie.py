@@ -51,6 +51,7 @@ PLIK_SEKRETU = 'sekret'
 CIASTECZKO = 'anberfiles_sesja'
 CIASTECZKO_FORMULARZA = 'anberfiles_formularz'   # wartość losowa do tokenu formularza
 POLE_FORMULARZA = 'formularz'                    # ukryte pole z tokenem formularza
+LINK_STARTOWY = ''      # przycisk „🏠 strona startowa” (HTML z server._link_startowy)
 WAZNOSC_S = 10 * 365 * 24 * 3600          # „do odwołania" — 10 lat
 MIN_DLUGOSC_HASLA = 10
 LIMIT_PROB = 10                           # prób logowania na adres …
@@ -406,7 +407,8 @@ def _strona(tytul: str, tresc: str, status: int) -> web.Response:
         headers={'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY'},
         text=('<!doctype html><meta charset=utf-8>'
               '<meta name="viewport" content="width=device-width,initial-scale=1">'
-              f'<title>{_html.escape(tytul)}</title><style>{_STYL}</style>{tresc}'))
+              f'<title>{_html.escape(tytul)}</title><style>{_STYL}</style>'
+              + (f'<div>{LINK_STARTOWY}</div>' if LINK_STARTOWY else '') + tresc))
 
 
 def _strona_logowania(instancja: str, dalej: str, blad: str = '', status: int = 401,

@@ -1,5 +1,8 @@
 """Link do strony startowej serwera („🏠 <nazwa instancji>”) — ustawienie
-strona_startowa: w nagłówku listy katalogów i w paskach widoków podglądu.
+strona_startowa: przycisk na KAŻDEJ stronie AnberFiles (lista, drzewo, podglądy,
+rejestr zdarzeń, kolejka lektora, ekran logowania i ustawienia hasła).
+02.10 wieczór Karol: „muszę mieć możliwość dostać się szybko do strony
+startowej" — drobny napis w wierszu pod nagłówkiem listy był niewidoczny.
 Adres w testach wyłącznie dokumentacyjny (192.0.2.0/24, RFC 5737)."""
 import pytest
 
@@ -7,6 +10,7 @@ from conftest import uruchom, wczytaj, zbuduj_anbernic, zbuduj_jarvis
 
 ADRES = 'http://192.0.2.10:8080/'
 HREF = f'href="{ADRES}"'
+PRZYCISK = 'class="af-start"'
 
 
 def _tresc(tmp_path):
@@ -20,7 +24,9 @@ def _strony(k, auth):
     async def sc(cl):
         out = {}
         for nazwa, url in (('lista', '/proj/'), ('md', '/proj/a.md?view=1'),
-                           ('csv', '/proj/b.csv?view=1')):
+                           ('csv', '/proj/b.csv?view=1'),
+                           ('drzewo', '/?explorer=1'), ('zdarzenia', '/?events=1'),
+                           ('kolejka_lektora', '/?lektorq=1')):
             r = await cl.get(url, auth=auth)
             assert r.status == 200, (url, r.status)
             out[nazwa] = await r.text()
@@ -34,7 +40,33 @@ def test_link_startowy_w_liscie_i_podgladach(tmp_path, auth):
     assert k.strona_startowa == ADRES
     for nazwa, html in _strony(k, auth).items():
         assert HREF in html, nazwa
-        assert 'title="Strona startowa">🏠 Jarvis</a>' in html, nazwa
+        assert PRZYCISK in html and '🏠 Jarvis</a>' in html, nazwa
+        assert 'target="_top"' in html, nazwa          # z panelu drzewa: całe okno
+
+
+def test_przycisk_na_liscie_przed_naglowkiem(tmp_path, auth):
+    """Lista katalogów: przycisk na samej górze (przed ścieżką), nie w wierszu
+    drobnych odnośników pod nią."""
+    _tresc(tmp_path)
+    k = wczytaj(zbuduj_jarvis(tmp_path, logowanie='basic', strona_startowa=ADRES))
+    html = _strony(k, auth)['lista']
+    assert html.index(PRZYCISK) < html.index('<h2>')
+    assert html.count(PRZYCISK) == 1
+
+
+def test_przycisk_na_ekranie_logowania_i_ustawienia_hasla(tmp_path):
+    import logowanie
+    k = wczytaj(zbuduj_jarvis(tmp_path, logowanie='formularz', strona_startowa=ADRES,
+                              ustaw_haslo_bez_tokenu='127.0.0.0/8'), haslo='')
+
+    async def sc(cl):
+        ustaw = await (await cl.get('/', headers={'Accept': 'text/html'})).text()
+        logowanie.ustaw_haslo(k.katalog_auth, 'dobre-haslo-1234')
+        zaloguj = await (await cl.get('/', headers={'Accept': 'text/html'})).text()
+        return ustaw, zaloguj
+    ustaw, zaloguj = uruchom(k, sc, naglowek=False)
+    assert 'Ustaw hasło' in ustaw and PRZYCISK in ustaw and HREF in ustaw
+    assert 'name="haslo"' in zaloguj and PRZYCISK in zaloguj and HREF in zaloguj
 
 
 def test_bez_ustawienia_brak_linku(tmp_path, auth):

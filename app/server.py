@@ -57,7 +57,15 @@ def _link_startowy() -> str:
     adres = getattr(KONF, 'strona_startowa', '') if KONF is not None else ''
     if not adres:
         return ''
-    return (f'<a href="{_esc(adres)}" title="Strona startowa">'
+    # 02.10 wieczór (Karol: „muszę szybko dostać się do strony startowej"): link
+    # był drobnym napisem między kilkunastoma innymi — teraz przycisk z własnym
+    # stylem (wygląda tak samo na każdym widoku, niezależnie od CSS strony);
+    # target=_top: z panelu-iframe drzewa przechodzi całe okno.
+    return (f'<a class="af-start" href="{_esc(adres)}" target="_top" '
+            f'title="Strona startowa {_esc(KONF.nazwa_instancji)}" '
+            'style="display:inline-block;font:700 1.05rem/1.2 system-ui,sans-serif;'
+            'padding:.4em .85em;margin:.15em .3em;border-radius:8px;border:0;'
+            'background:#1a5fb4;color:#fff;text-decoration:none;white-space:nowrap">'
             f'🏠 {_esc(KONF.nazwa_instancji)}</a>')
 
 
@@ -2554,7 +2562,7 @@ def render_explorer_page(start_url='/'):
         '.pane.act{border-left-color:#1a5fb4}.pane .ph{font-size:.8em;'
         'padding:.2em .5em;background:#2b2f37;color:#9fb;cursor:pointer}'
         '.pane iframe{flex:1;width:100%;border:0}#paneB{display:none}</style>'
-        '<div class="tb"><a href="' + su + '">← powrót</a>'
+        '<div class="tb">' + _link_startowy() + '<a href="' + su + '">← powrót</a>'
         '<button id="bt" class="on" onclick="ht()">☰ drzewo</button>'
         '<button id="bb" onclick="tpb()">⧉ druga karta</button>'
         '<span style="margin-left:.5em">ładuj do:</span>'
@@ -2805,6 +2813,7 @@ def _strona_katalogu_niedostepnego(raw, status, tytul, przyczyna=''):
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>Katalog niedostępny — AnberFiles</title>'
             '<body style="font-family:system-ui,sans-serif;margin:1.5em">'
+            f'<div>{_link_startowy()}</div>'
             f'<h2>{_html.escape(tytul)}</h2>{szczegol}'
             f'<p><a href="{_html.escape(rodzic_url)}">↑ katalog nadrzędny</a></p>')
     return web.Response(status=status, text=html, content_type='text/html',
@@ -2844,7 +2853,8 @@ async def serve(request):
         if odm is not None:
             return odm
     if 'lektorq' in request.query:
-        return web.Response(text=LEKTORQ_PAGE, content_type='text/html')
+        return web.Response(text=LEKTORQ_PAGE.replace('<!--AF-START-->', _link_startowy()),
+                            content_type='text/html')
     if 'lektorqj' in request.query:
         return web.json_response(_lektor_queue_json())
     if 'docxprog' in request.query:
@@ -3008,12 +3018,12 @@ async def serve(request):
             FAVICON_LINK,
             f'<title>{_esc(rel_url)}</title>',
             f'<style>{STYLE}</style>',
+            (f'<div>{_link_startowy()}</div>' if _link_startowy() else ''),
             f'<h2>{breadcrumb}</h2>',
             f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
             f'⟳ auto-odświeżanie'
             + (' · <a href="/?lektorq=1">🔊 kolejka lektora</a>' if lektor_on else '')
             + ' · <a href="?explorer=1">🌳 drzewo</a>'
-            + (f' · {_link_startowy()}' if _link_startowy() else '')
             + (' · <a href="#" id="mkd">📁+ nowy folder</a>' if zapis else '')
             + (f' · <span class="muted">🔒 tylko odczyt ({_html.escape(KONF.nazwa_instancji)})</span>'
                if not zapis else '')
@@ -3401,7 +3411,7 @@ LEKTORQ_PAGE = (
     '.pb{width:90px}'
     '}'
     '</style>'
-    '<h2><a href="/" class="dir">📁 root</a> <span class="sep">/</span> '
+    '<!--AF-START--><h2><a href="/" class="dir">📁 root</a> <span class="sep">/</span> '
     '🔊 Kolejka lektora</h2>'
     '<p class="muted">podgląd na żywo (co 3 s) · ✕ usuwa pozycję '
     '(trwająca generacja zostaje przerwana) · '
@@ -5169,6 +5179,7 @@ def utworz_aplikacje(k):
     if k.logowanie == 'formularz':
         # import tylko tu: konsola (basic) nie potrzebuje pliku logowanie.py
         import logowanie as _LOGOWANIE
+        _LOGOWANIE.LINK_STARTOWY = _link_startowy()  # przycisk 🏠 także na ekranie logowania
         _LOGOWANIE.zapewnij_sekret(k.katalog_auth)   # 32 bajty, 0600, przy 1. starcie
         _BRAMKA = _LOGOWANIE.Bramka(rejestr=_evlog, bez_tokenu=k.ustaw_haslo_bez_tokenu,
                                     oglos=_oglos_token_startowy)

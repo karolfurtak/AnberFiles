@@ -385,3 +385,17 @@ def test_naglowek_i_odcisk():
     assert prz.odcisk(t) != prz.odcisk(t + 'Nowe.\n')
     assert prz.naglowek('# Bez nagłówka\n') == {}
     assert HASLO  # conftest w użyciu
+
+
+def test_przycisk_strony_startowej_na_liscie_i_w_widoku_sluchania(tmp_path, auth):
+    """02.10 wieczór: przycisk „🏠 Jarvis” także na liście „Do przesłuchania”
+    i w widoku słuchania."""
+    k, _ = _konf(tmp_path)
+
+    async def sc(cl):
+        lista = await (await cl.get('/?przesluchania=1', auth=auth)).text()
+        sluchaj = await (await cl.get('/vault/Zasoby/MoCap/plan-kamer.md?sluchaj=1',
+                                      auth=auth)).text()
+        return lista, sluchaj
+    for html in uruchom(k, sc):
+        assert 'class="af-start"' in html and f'href="{ORIGIN_STARTOWA}/"' in html
