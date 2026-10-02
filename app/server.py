@@ -924,7 +924,7 @@ async def docx_to_pdf(target: Path) -> Path | None:
             return cached
         proc = await asyncio.create_subprocess_exec(
             'soffice', '--headless',
-            '-env:UserInstallation=file:///tmp/lo_preview_profile',
+            profil_lo('lo-profil-podglad'),
             '--convert-to', 'pdf', '--outdir', str(DOCX_CACHE), str(target),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         try:
@@ -3374,6 +3374,33 @@ def _lektor_silnik() -> str:
     return v if v in LEKTOR_SILNIKI else ''
 
 
+# ── Pliki robocze (C8) ──────────────────────────────────────────────────────
+# Nazwy w /tmp NIEPRZEWIDYWALNE (tempfile: losowa część, prawa 0600/0700) —
+# inny użytkownik maszyny nie podłoży dowiązania pod znaną nazwę, a dwa
+# równoległe zadania dla tego samego pliku nie nadpisują sobie wyników.
+# Profile LibreOffice (stan między uruchomieniami) — w katalogu danych instancji.
+# /tmp/lektor.lock, /tmp/lektor.pid i /tmp/lektor_progress.json zostają: to
+# rygiel i stan dzielone z lektorem uruchamianym poza serwerem.
+
+def tmp_plik(stem: str, sufiks: str) -> Path:
+    """Nowy pusty plik roboczy <stem>_<losowe><sufiks> w katalogu tymczasowym."""
+    import tempfile
+    fd, sciezka = tempfile.mkstemp(prefix=f'{stem}_', suffix=sufiks)
+    os.close(fd)
+    return Path(sciezka)
+
+
+def tmp_katalog(prefiks: str):
+    """Katalog roboczy usuwany po wyjściu z bloku with (TemporaryDirectory)."""
+    import tempfile
+    return tempfile.TemporaryDirectory(prefix=f'anberfiles-{prefiks}-')
+
+
+def profil_lo(nazwa: str) -> str:
+    """Argument -env:UserInstallation dla soffice: profil w katalogu danych."""
+    return '-env:UserInstallation=' + (KONF.katalog_danych / nazwa).resolve().as_uri()
+
+
 def _docx_to_txt(p: Path) -> Path:
     """Awaryjne źródło dla lektora: tekst wprost z DOCX (python-docx)."""
     import docx
@@ -3384,7 +3411,7 @@ def _docx_to_txt(p: Path) -> Path:
             cells = [c.text.strip() for c in row.cells if c.text.strip()]
             if cells:
                 parts.append(' . '.join(cells))
-    tmp = Path('/tmp') / (p.stem + '_lektor_src.txt')
+    tmp = tmp_plik(p.stem, '_lektor_src.txt')
     tmp.write_text('\n'.join(parts), encoding='utf-8')
     return tmp
 
@@ -3404,43 +3431,44 @@ async def print_item(request):
     if ext not in ('.md', '.docx', '.pdf'):
         return web.Response(status=400, text='Druk: .md/.docx/.pdf')
 
-    async def _run():
-        import time as _t
-        log = open(KONF.bledy_druku, 'ab')
-        log.write(f'\n=== {_t.strftime("%F %T")} {target.name} ===\n'.encode())
-
-        async def sh(*cmd):
-            p = await asyncio.create_subprocess_exec(
-                *cmd, stdout=log, stderr=log)
-            await p.wait()
-            return p.returncode
-
-        try:
-            pdf = target
-            if ext == '.md':
-                tmp_docx = Path('/tmp') / (target.stem + '_print.docx')
-                if await sh(sys.executable, str(KONF.skrypt_eksportu_docx),
-                            str(target), '-o', str(tmp_docx)):
-                    return
-                pdf = Path('/tmp') / (tmp_docx.stem + '.pdf')
-                if await sh('soffice', '--headless',
-                            '-env:UserInstallation=file:///tmp/lo_print',
-                            '--convert-to', 'pdf', '--outdir', '/tmp',
-                            str(tmp_docx)):
-                    return
-            elif ext == '.docx':
-                pdf = Path('/tmp') / (target.stem + '.pdf')
-                if await sh('soffice', '--headless',
-                            '-env:UserInstallation=file:///tmp/lo_print',
-                            '--convert-to', 'pdf', '--outdir', '/tmp',
-                            str(target)):
-                    return
-            await sh('lp', '-d', 'Canon_G3070', str(pdf))
-        finally:
-            log.close()
-
-    asyncio.ensure_future(_run())
+    asyncio.ensure_future(_drukuj(target))
     return web.json_response({'status': 'wysłano do druku'}, status=202)
+
+
+async def _polecenie(*cmd, log=None) -> int:
+    """Uruchomienie programu zewnętrznego (druk); wyjście do dziennika błędów.
+    Jedno miejsce — testy podstawiają atrapę."""
+    p = await asyncio.create_subprocess_exec(*cmd, stdout=log, stderr=log)
+    await p.wait()
+    return p.returncode
+
+
+async def _drukuj(target: Path):
+    """.md → export_to_docx → soffice → PDF → lp; .docx → soffice → PDF → lp;
+    .pdf → lp. Pliki pośrednie w katalogu roboczym zadania (C8), usuwanym
+    po przekazaniu PDF-u do CUPS (lp kopiuje plik do kolejki)."""
+    import time as _t
+    ext = target.suffix.lower()
+    with open(KONF.bledy_druku, 'ab') as log, tmp_katalog('druk') as kat:
+        log.write(f'\n=== {_t.strftime("%F %T")} {target.name} ===\n'.encode())
+        log.flush()
+        kat = Path(kat)
+        pdf = target
+        zrodlo_pdf = None
+        if ext == '.md':
+            zrodlo_pdf = kat / (target.stem + '_print.docx')
+            if await _polecenie(sys.executable, str(KONF.skrypt_eksportu_docx),
+                                str(target), '-o', str(zrodlo_pdf), log=log):
+                return
+        elif ext == '.docx':
+            zrodlo_pdf = target
+        if zrodlo_pdf is not None:
+            pdf = kat / (zrodlo_pdf.stem + '.pdf')
+            if await _polecenie('soffice', '--headless', profil_lo('lo-profil-druk'),
+                                '--convert-to', 'pdf', '--outdir', str(kat),
+                                str(zrodlo_pdf), log=log):
+                return
+        await _polecenie('lp', '-d', 'Canon_G3070', str(pdf), log=log)
 
 
 async def lektor_item(request):
