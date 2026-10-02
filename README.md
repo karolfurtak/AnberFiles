@@ -71,6 +71,29 @@ ale serwuje dowolne drzewo katalogów.
 - **trwałość**: rejestr kolejki na dysku + checkpoint per chunk — kolejka
   i postęp przeżywają restart serwera i **reboot urządzenia** (wznowienie
   od ostatniego ukończonego chunka)
+- **🗑 nagranie** w pasku podglądu: usuwa nagranie razem z `.cues.json`
+  i `.chapters.json` — w katalogu lektora także przy instancji tylko do odczytu
+  (inne pliki dalej 403); wpis w rejestrze zdarzeń
+- **wygasanie**: `wiek_nagran_dni` (`[serwer]`, domyślnie 0 = wyłączone) — nagrania
+  w katalogu lektora starsze niż N dni serwer usuwa przy starcie i co godzinę,
+  każde z wpisem w rejestrze; pasek podglądu pokazuje „⏳ zostało …”
+
+**Lista „Do przesłuchania” (moduł `przesluchania`, domyślnie wyłączony):**
+- `/?przesluchania=1` — notatki `.md` z `przesluchania_zakres` ze `status:` w nagłówku
+  (`do-akceptacji`, `zaakceptowane-niewdrozone`, …) albo z tabeli propozycji
+  `przesluchania_kandydaci` (wiersze tabeli: ścieżka w odwróconych apostrofach, rodzaj, status); zakładki: do decyzji,
+  zaakceptowane niewdrożone, rozstrzygnięte; zakładka zapamiętana na serwerze
+- `<notatka>.md?sluchaj=1` — tekst + lektor (zdania podświetlane, gdy jest nagranie
+  z czasami zdań) + decyzja „akceptuję / do poprawy / odrzucam” z uwagą tekstową;
+  pozycja odtwarzania i „odsłuchane” (95 % nagrania) zapisywane na serwerze
+- stan: `katalog_danych/przesluchania.json` (zapis atomowy, dziennik decyzji tylko
+  dopisywany); vault nigdy nie jest zapisywany — decyzja obowiązuje, dopóki treść
+  notatki (bez nagłówka) się nie zmieni
+- eksport dla agenta przenoszącego decyzje do vaulta: `katalog_danych/przesluchania-eksport.md`
+  i `GET /?przesluchania=eksport` (JSON); potwierdzenie `POST /?przesluchania=potwierdz`
+  `{"do": id}` (powtarzalne)
+- `GET /?przesluchania=licznik` — liczba notatek do decyzji dla kafelka strony startowej;
+  zgoda CORS z ciasteczkiem tylko dla originu z `strona_startowa`
 
 **Bezpieczeństwo:**
 - HTTP Basic Auth (konfigurowany przez env; pusty `SERVER_PASS` = open access,
@@ -116,7 +139,7 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   `katalog_lektora`, `katalog_eksportu`, pliki rejestru i błędów, pamięć podręczna
   podglądu DOCX, katalog ZIP, favikona, kosz), `[moduly]` (`podglad_docx`,
   `eksport_docx`, `lektor`, `lektor_opisy_ai`, `wylaczanie`, `druk`, `bateria`,
-  `kadrowanie` — `tak`/`nie`).
+  `kadrowanie`, `przesluchania` — `tak`/`nie`; `przesluchania` bez wpisu = `nie`).
 - Eksport DOCX (POST `?docx=1` na `.md`, przycisk w podglądzie): skrypt wyłącznie z `katalog_eksportu` — domyślnie
   `export_to_docx.py`; dyrektywa `<!-- eksporter: X -->` w dokumencie albo
   `<projekt>/szablon/eksporter.conf` wybiera tylko NAZWĘ z białej listy plików

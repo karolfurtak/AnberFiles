@@ -28,6 +28,8 @@ import sys
 from aiohttp import web
 
 import konfiguracja as _konf
+import nagrania as _nagr
+import przesluchania as _prz
 
 try:
     import markdown as _markdown      # renderowany podgląd .md (opcjonalny)
@@ -323,7 +325,7 @@ AUDIO_MIME = {'.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.wav': 'audio/wav',
 # Lektor zapisuje <stem>_lektor.<ext>: obok dokumentu (Anbernic) albo w
 # katalog_lektora/<ścieżka względna katalogu źródła>/ (gdy ustawiony).
 # Preferuj FLAC > MP3 > ...
-LEKTOR_AUDIO_EXT = ('.flac', '.mp3', '.wav', '.ogg', '.m4a', '.opus')
+LEKTOR_AUDIO_EXT = _nagr.AUDIO_EXT
 LEKTOR_ZRODLA = ('.md', '.docx', '.txt')        # dokumenty, które lektor czyta
 LEKTOR_SILNIKI = ('edge', 'piper')              # silniki mowy czytaj_tts.py
 LEKTOR_UWAGA_EDGE = 'Silnik edge: tekst opuszcza urządzenie (usługa Microsoft).'
@@ -425,20 +427,10 @@ def render_read_page(target: Path, audio: Path, cues_path: Path) -> str:
     (timeupdate). Klik w zdanie = przewinięcie audio. Tekst = wersja CZYTANA
     (po normalizacji), nie surowy DOCX — zgodny 1:1 z tym, co słychać."""
     import html as _html
-    import json as _json
-    try:
-        cues = _json.loads(cues_path.read_text(encoding='utf-8'))
-    except Exception:
-        cues = []
-    times = [float(c.get('t', 0)) for c in cues]
-    spans = []
-    for i, c in enumerate(cues):
-        txt = _html.escape(c.get('text', ''))
-        spans.append(f'<span class=s data-i="{i}" onclick="seek({i})">{txt}</span>')
+    spans, times_js, n_zdan = _zdania_lektora(cues_path)
     aq = _url_abs(audio)
     dq = quote(target.name)
-    body = ' '.join(spans) or '<em>brak zdań w sidecarze</em>'
-    times_js = '[' + ','.join(f'{t:.2f}' for t in times) + ']'
+    body = spans or '<em>brak zdań w sidecarze</em>'
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -463,24 +455,14 @@ def render_read_page(target: Path, audio: Path, cues_path: Path) -> str:
         f'<a href="./">📁 folder</a>{_link_startowy()}'
         f'<a href="{dq}?view=1">📘 podgląd</a>'
         f'<span style="word-break:break-all">{_html.escape(target.name)}</span>'
-        f'<span style="color:#6fce8f;margin-left:auto">📖 {len(cues)} zdań</span>'
+        f'<span style="color:#6fce8f;margin-left:auto">📖 {n_zdan} zdań</span>'
         '</div>'
         f'<audio id="au" controls preload="metadata" src="{aq}"></audio>'
         '</div>'
         f'<div id="txt">{body}</div>'
         '<script>(function(){'
-        f'const T={times_js};'
-        'const sp=[...document.querySelectorAll(".s")];'
-        'const au=document.getElementById("au");let cur=-1;'
-        'function hi(i){if(i===cur)return;'
-        'if(cur>=0&&sp[cur])sp[cur].classList.remove("cur");cur=i;'
-        'if(i>=0&&sp[i]){sp[i].classList.add("cur");'
-        'sp[i].scrollIntoView({block:"center",behavior:"smooth"});}}'
-        'au.addEventListener("timeupdate",function(){'
-        'const t=au.currentTime;let lo=0,h=T.length-1,k=-1;'
-        'while(lo<=h){const m=(lo+h)>>1;if(T[m]<=t){k=m;lo=m+1;}else h=m-1;}'
-        'hi(k);});'
-        'window.seek=function(i){au.currentTime=T[i]+0.02;au.play();};'
+        f'const T={times_js};const au=document.getElementById("au");'
+        + JS_PODSWIETLANIE +
         '})();</script>')
 
 AUDIO_STYLE = (
@@ -1818,7 +1800,8 @@ def _lektor_przycisk(target: Path, aud) -> str:
             '<span id="lekst" style="color:#6fce8f;font-size:.9em"></span>'
             f'<script>window._LEK_SILNIK={_json_do_script(_lektor_silnik())};'
             + ('' if KONF.modul('lektor_opisy_ai') else 'window._LEK_OPISY=false;')
-            + '</script>' + _lektor_uwaga_js() + LEKTOR_PODGLAD_JS)
+            + '</script>' + _lektor_uwaga_js() + LEKTOR_PODGLAD_JS
+            + _lektor_usun_html(aud))
 
 
 # Drag & drop upload — upuszczenie plików na listing wgrywa je do bieżącego
@@ -2850,6 +2833,8 @@ async def serve(request):
             return web.json_response({'pct': 0, 'done': 0, 'total': 0})
     if 'events' in request.query:
         return render_events_page()
+    if 'przesluchania' in request.query:
+        return await przesluchania_get(request)
 
     raw = request.match_info.get('path', '').strip('/')
 
@@ -3033,7 +3018,12 @@ async def serve(request):
 
 async def delete_item(request):
     """DELETE na pliku = przeniesienie do kosza (klucz kosz; domyślnie ROOT/.kosz/,
-    nic nie znika trwale). Katalogi: tylko puste (rmdir). .kosz ukryty w listingu."""
+    nic nie znika trwale). Katalogi: tylko puste (rmdir). .kosz ukryty w listingu.
+    Wyjątek: nagranie lektora w katalogu lektora — usuwane trwale (z plikami
+    towarzyszącymi), także w trybie tylko do odczytu (_usun_nagranie_lektora)."""
+    odp = _usun_nagranie_lektora(request)
+    if odp is not None:
+        return odp
     odm = _odmowa_zapisu()
     if odm is not None:
         return odm
@@ -4146,6 +4136,12 @@ def _wgrywanie_za_duze(target: Path, rozmiar: int, saved=()) -> web.Response:
 
 
 async def upload(request):
+    # lista „Do przesłuchania”: zapis tylko do katalogu danych (także przy
+    # tylko-odczycie — vault nietknięty)
+    if 'przesluchania' in request.query:
+        return await przesluchania_post(request)
+    if 'decyzja' in request.query or 'odsluch' in request.query:
+        return await notatka_post(request)
     if 'print' in request.query:
         odm = _modul_wylaczony('druk')
         return odm if odm is not None else await print_item(request)
@@ -4261,6 +4257,570 @@ async def upload(request):
     return web.json_response({'saved': saved, 'skipped': skipped})
 
 
+# ── Nagrania lektora: usuwanie z podglądu i wygasanie (app/nagrania.py) ────
+# Usuwanie nagrania działa także w trybie tylko do odczytu — ale WYŁĄCZNIE dla
+# plików `*_lektor.<audio>` w katalogu lektora (zapisywalnym z założenia);
+# każdy inny plik dalej dostaje 403. Nagranie znika trwale (razem z .cues.json
+# i .chapters.json) — da się je wygenerować ponownie.
+WYGASANIE_CO_S = 3600
+_WYGASANIE_ZADANIE = None
+
+
+def _w_katalogu_lektora(p: Path) -> bool:
+    if KONF.katalog_lektora is None:
+        return False
+    kl = Path(KONF.katalog_lektora).resolve()
+    p = Path(p).resolve()
+    return kl in p.parents
+
+
+def _nagranie_usuwalne(aud) -> bool:
+    """Czy przycisk 🗑 nagrania ma sens: nagranie w katalogu lektora (zawsze),
+    albo obok dokumentu, gdy instancja nie jest tylko do odczytu (→ kosz)."""
+    if aud is None or not KONF.modul('lektor'):
+        return False
+    return _w_katalogu_lektora(aud) or not KONF.tylko_odczyt
+
+
+def _rel_root(p: Path) -> str:
+    try:
+        return Path(p).resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return Path(p).name
+
+
+def _usun_nagranie_lektora(request):
+    """DELETE nagrania w katalogu lektora → 200; None = to nie ten przypadek
+    (dalej zwykłe usuwanie z jego zasadami, w tym 403 przy tylko-odczycie)."""
+    if not KONF.modul('lektor') or KONF.katalog_lektora is None:
+        return None
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return None
+    if not (target.is_file() and _w_katalogu_lektora(target)
+            and _nagr.jest_nagraniem_lektora(target)):
+        return None
+    try:
+        usuniete = _nagr.usun_nagranie(target)
+    except OSError as e:
+        _evlog('lektor', f'usunięcie nagrania {raw} nieudane: {e}', level='error')
+        return web.Response(status=500, text=f'Usunięcie nagrania nieudane: {e}')
+    _evlog('lektor', f'nagranie usunięte ręcznie: {raw} ({len(usuniete)} pliki) '
+           '— można wygenerować ponownie')
+    return web.json_response({'deleted': raw, 'nagranie': True, 'pliki': usuniete})
+
+
+def sprzataj_wygasle_nagrania(teraz=None) -> list:
+    """Usuwa nagrania starsze niż wiek_nagran_dni z katalogu lektora, każde
+    z wpisem w rejestrze zdarzeń. Wyłączone: moduł lektora, brak katalogu
+    lektora albo wiek_nagran_dni = 0."""
+    if (not KONF.modul('lektor') or KONF.katalog_lektora is None
+            or KONF.wiek_nagran_dni <= 0):
+        return []
+    wynik = _nagr.sprzataj(Path(KONF.katalog_lektora), KONF.wiek_nagran_dni, teraz)
+    for p, wiek_h, blad in wynik:
+        if blad:
+            _evlog('lektor', f'wygasłe nagranie {_rel_root(p)}: usunięcie nieudane — '
+                   f'{blad}', level='error')
+        else:
+            _evlog('lektor', f'nagranie wygasło (wiek {wiek_h:.0f} h, limit '
+                   f'{KONF.wiek_nagran_dni} dni) i zostało usunięte: {_rel_root(p)} '
+                   '— można wygenerować ponownie')
+    return wynik
+
+
+async def _wygasanie_petla():
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            await loop.run_in_executor(None, sprzataj_wygasle_nagrania)
+        except Exception as e:                      # pętla nie może umrzeć po cichu
+            _evlog('lektor', f'sprzątanie wygasłych nagrań: {e}', level='error')
+        await asyncio.sleep(WYGASANIE_CO_S)
+
+
+async def _wygasanie_start(app):
+    global _WYGASANIE_ZADANIE
+    if (KONF.modul('lektor') and KONF.katalog_lektora is not None
+            and KONF.wiek_nagran_dni > 0):
+        _WYGASANIE_ZADANIE = asyncio.ensure_future(_wygasanie_petla())
+
+
+async def _wygasanie_stop(app):
+    global _WYGASANIE_ZADANIE
+    if _WYGASANIE_ZADANIE is not None:
+        _WYGASANIE_ZADANIE.cancel()
+        _WYGASANIE_ZADANIE = None
+
+
+LEKTOR_USUN_JS = (
+    '<script>' + JS_ZAPIS + '(function(){'
+    'const b=document.getElementById("lekdel");if(!b)return;'
+    'b.onclick=async e=>{e.preventDefault();'
+    'if(!confirm("Usunąć nagranie lektora?\\nMożna je wygenerować ponownie."))return;'
+    'try{const r=await afFetch(b.dataset.u,{method:"DELETE"});'
+    'if(r.ok){location.reload();}'
+    'else{alert("Błąd usuwania nagrania: HTTP "+r.status+" "+await r.text());}'
+    '}catch(err){alert("Błąd usuwania nagrania");}};'
+    '})();</script>')
+
+
+def _lektor_usun_html(aud) -> str:
+    """🗑 nagranie + czas do wygaśnięcia (pasek podglądu); pusty, gdy nie ma
+    nagrania albo nie da się go usunąć."""
+    if not _nagranie_usuwalne(aud):
+        return ''
+    wyg = ''
+    if _w_katalogu_lektora(aud) and KONF.wiek_nagran_dni > 0:
+        try:
+            opis = _nagr.opis_pozostalo(_nagr.pozostalo_s(aud, KONF.wiek_nagran_dni))
+        except OSError:
+            opis = ''
+        if opis:
+            wyg = (f'<span class="lekwyg" title="Nagranie zniknie samo po '
+                   f'{KONF.wiek_nagran_dni} dniach" style="color:#9aa0ab;'
+                   f'font-size:.85em">⏳ {opis}</span>')
+    return (f'<a href="#" id="lekdel" data-u="{_esc(_url_abs(aud))}" '
+            'title="Usuń nagranie (można wygenerować ponownie)">🗑 nagranie</a>'
+            + wyg + LEKTOR_USUN_JS)
+
+
+# ── Lista „Do przesłuchania” (app/przesluchania.py) ─────────────────────────
+# Widoki: /?przesluchania=1 (lista), <notatka>.md?sluchaj=1 (tekst + lektor +
+# decyzja), /?przesluchania=licznik (JSON dla kafelka strony startowej),
+# /?przesluchania=eksport (JSON dla agenta laptopa). Zapisy (POST, nagłówek
+# X-AnberFiles) idą WYŁĄCZNIE do katalogu danych — działają przy vaulcie tylko
+# do odczytu, bo vaulta nie dotykają.
+_PRZ_MAGAZYN = None
+_PRZ_SKAN = {'t': 0.0, 'dane': None}
+PRZ_SKAN_TTL_S = 30
+
+
+def _prz_niedostepne():
+    odm = _modul_wylaczony('przesluchania')
+    if odm is not None:
+        return odm
+    if _PRZ_MAGAZYN is None or KONF.przesluchania_zakres is None:
+        return web.Response(status=503, text='Lista „Do przesłuchania” niedostępna — '
+                            'stan nie został wczytany (rejestr zdarzeń).')
+    return None
+
+
+def _prz_zakres() -> Path:
+    return Path(KONF.przesluchania_zakres).resolve()
+
+
+async def _prz_notatki(odswiez: bool = False) -> list:
+    """Skan zakresu z pamięcią podręczną PRZ_SKAN_TTL_S (vault zmienia się
+    co kilkanaście minut — odświeżanie klonu); skan w wątku."""
+    import time as _t
+    teraz = _t.monotonic()
+    if (not odswiez and _PRZ_SKAN['dane'] is not None
+            and teraz - _PRZ_SKAN['t'] < PRZ_SKAN_TTL_S):
+        return _PRZ_SKAN['dane']
+    loop = asyncio.get_running_loop()
+    kand = await loop.run_in_executor(
+        None, _prz.wczytaj_kandydatow, KONF.przesluchania_kandydaci)
+    dane = await loop.run_in_executor(None, _prz.skanuj, _prz_zakres(), kand)
+    _PRZ_SKAN.update(t=teraz, dane=dane)
+    return dane
+
+
+def _prz_wiersze(notatki: list) -> list:
+    ostatnie = _PRZ_MAGAZYN.ostatnie_decyzje()
+    granica = _PRZ_MAGAZYN.potwierdzono_do()
+    wynik = []
+    for n in notatki:
+        ost = ostatnie.get(n['sciezka'])
+        status, zrodlo = _prz.status_efektywny(n, ost)
+        w = dict(n)
+        w.update(status=status, zrodlo=zrodlo, zakladka=_prz.zakladka_statusu(status),
+                 ostatnia=ost, odsluch=_PRZ_MAGAZYN.odsluch(n['sciezka']),
+                 nieprzeniesiona=bool(zrodlo == 'decyzja' and ost['id'] > granica),
+                 url='/' + quote(_rel_root(n['plik'])),
+                 nagranie=_lektor_audio_for(n['plik'], exports=True) is not None)
+        wynik.append(w)
+    return wynik
+
+
+def _prz_licznik(wiersze: list) -> dict:
+    lic = {z: 0 for z in _prz.ZAKLADKI}
+    for w in wiersze:
+        if w['zakladka']:
+            lic[w['zakladka']] += 1
+    return lic
+
+
+def _cors_strony_startowej(request, odp):
+    """Kafelek strony startowej (inny port = inny origin) czyta licznik z
+    ciasteczkiem logowania: zgoda CORS tylko dla originu z strona_startowa."""
+    from urllib.parse import urlsplit
+    adres, origin = KONF.strona_startowa, request.headers.get('Origin', '')
+    if not adres or not origin:
+        return odp
+    u = urlsplit(adres)
+    if origin.strip().lower() == f'{u.scheme}://{u.netloc}'.lower():
+        odp.headers['Access-Control-Allow-Origin'] = origin.strip()
+        odp.headers['Access-Control-Allow-Credentials'] = 'true'
+        odp.headers['Vary'] = 'Origin'
+    return odp
+
+
+async def przesluchania_get(request):
+    odm = _prz_niedostepne()
+    if odm is not None:
+        return odm
+    co = request.query.get('przesluchania', '')
+    if co == 'eksport':
+        return web.json_response(_prz.eksport_json(_PRZ_MAGAZYN),
+                                 headers={'Cache-Control': 'no-store'})
+    wiersze = _prz_wiersze(await _prz_notatki(odswiez='odswiez' in request.query))
+    if co == 'licznik':
+        lic = _prz_licznik(wiersze)
+        return _cors_strony_startowej(request, web.json_response(
+            {'do_decyzji': lic['decyzja'], 'zaakceptowane': lic['zaakceptowane'],
+             'nieprzeniesione': len(_PRZ_MAGAZYN.nieprzeniesione())},
+            headers={'Cache-Control': 'no-store'}))
+    z = request.query.get('z') or _PRZ_MAGAZYN.ui('zakladka', 'decyzja')
+    if z not in _prz.ZAKLADKI:
+        z = 'decyzja'
+    return web.Response(text=render_przesluchania_page(wiersze, z),
+                        content_type='text/html', headers={'Cache-Control': 'no-store'})
+
+
+async def _prz_json(request) -> dict:
+    try:
+        d = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text='Treść żądania nie jest poprawnym JSON-em.')
+    if not isinstance(d, dict):
+        raise web.HTTPBadRequest(text='Oczekiwany obiekt JSON.')
+    return d
+
+
+async def przesluchania_post(request):
+    """POST /?przesluchania=ui {zakladka} · POST /?przesluchania=potwierdz {do}."""
+    odm = _prz_niedostepne()
+    if odm is not None:
+        return odm
+    co = request.query.get('przesluchania', '')
+    d = await _prz_json(request)
+    try:
+        if co == 'ui':
+            z = d.get('zakladka')
+            if z not in _prz.ZAKLADKI:
+                return web.Response(status=400, text=f'Nieznana zakładka: {z!r}')
+            _PRZ_MAGAZYN.ustaw_ui('zakladka', z)
+            return web.json_response({'zakladka': z})
+        if co == 'potwierdz':
+            try:
+                do = int(d.get('do'))
+            except (TypeError, ValueError):
+                return web.Response(status=400, text='Pole „do” musi być liczbą.')
+            wynik = _PRZ_MAGAZYN.potwierdz(do)
+            _evlog('przesluchania', f'decyzje przeniesione do vaulta do id {wynik}')
+            return web.json_response({'potwierdzono_do': wynik})
+    except ValueError as e:
+        return web.Response(status=400, text=str(e))
+    except _prz.BladStanu as e:
+        _evlog('przesluchania', str(e), level='error')
+        return web.Response(status=500, text=f'BŁĄD zapisu stanu: {e}')
+    return web.Response(status=400, text=f'Nieznane polecenie: {co!r}')
+
+
+def _prz_notatka(request):
+    """(plik, ścieżka względem zakresu) notatki z adresu albo odpowiedź błędu."""
+    raw = request.match_info.get('path', '').strip('/')
+    try:
+        target = (ROOT / raw).resolve()
+    except Exception:
+        return None, web.Response(status=400)
+    zakres = _prz_zakres()
+    if (zakres not in target.parents or target.suffix.lower() != '.md'
+            or not target.is_file()):
+        return None, web.Response(status=404, text='To nie jest notatka z listy '
+                                  '„Do przesłuchania”.')
+    return (target, target.relative_to(zakres).as_posix()), None
+
+
+async def notatka_post(request):
+    """POST <notatka>.md?decyzja=1 {decyzja, uwaga} ·
+    POST <notatka>.md?odsluch=1 {pozycja, koniec}."""
+    odm = _prz_niedostepne()
+    if odm is not None:
+        return odm
+    nt, odm = _prz_notatka(request)
+    if odm is not None:
+        return odm
+    target, rel = nt
+    d = await _prz_json(request)
+    try:
+        if 'decyzja' in request.query:
+            tekst = target.read_text(encoding='utf-8', errors='replace')
+            wpis = _PRZ_MAGAZYN.dodaj_decyzje(
+                rel, str(d.get('decyzja', '')), str(d.get('uwaga', '') or ''),
+                _prz.odcisk(tekst), _prz.tytul(tekst, target.name))
+            _evlog('przesluchania', f'decyzja id {wpis["id"]}: '
+                   f'{_prz.NAZWY_DECYZJI[wpis["decyzja"]]} — {rel}'
+                   + (f' — uwaga: {wpis["uwaga"][:200]}' if wpis['uwaga'] else ''))
+            return web.json_response(wpis)
+        poz = d.get('pozycja')
+        o = _PRZ_MAGAZYN.ustaw_odsluch(
+            rel, pozycja_s=float(poz) if poz is not None else None,
+            odsluchane=bool(d.get('koniec')))
+        return web.json_response(o)
+    except (ValueError, TypeError) as e:
+        return web.Response(status=400, text=str(e))
+    except _prz.BladStanu as e:
+        _evlog('przesluchania', str(e), level='error')
+        return web.Response(status=500, text=f'BŁĄD zapisu stanu: {e}')
+
+
+PRZ_STYLE = (
+    'body{margin:0;background:#14161c;color:#cfd6df;'
+    'font-family:system-ui,sans-serif;font-size:18px}'
+    '.hd{position:sticky;top:0;z-index:5;background:#1d2027;box-shadow:0 2px 8px #0007}'
+    '.bar{display:flex;gap:.5em;align-items:center;padding:.5em .8em;flex-wrap:wrap;'
+    'font-size:.9em}'
+    '.bar a,.bar button{color:#7ab7ff;background:none;text-decoration:none;'
+    'border:1px solid #343a45;border-radius:6px;padding:.35em .7em;font:inherit;'
+    'cursor:pointer;min-height:40px;display:inline-flex;align-items:center}'
+    '.tabs{display:flex;gap:.4em;padding:.4em .8em .6em;flex-wrap:wrap}'
+    '.tabs button{flex:1 1 auto;min-height:44px;font:inherit;font-size:.9em;'
+    'background:#232731;color:#cfd6df;border:1px solid #343a45;border-radius:8px;'
+    'cursor:pointer;padding:.3em .8em}'
+    '.tabs button.on{background:#1a5fb4;border-color:#1a5fb4;color:#fff}'
+    '.lst{max-width:820px;margin:0 auto;padding:.6em .8em 4em}'
+    '.prj{color:#8a93a0;font-size:.85em;margin:1.2em .2em .4em;text-transform:none}'
+    'a.row{display:block;background:#1d2027;border:1px solid #2a2f38;border-radius:10px;'
+    'padding:.7em .9em;margin:.45em 0;color:#e8e9ec;text-decoration:none;min-height:44px}'
+    'a.row:active,a.row:hover{background:#262a33}'
+    '.tt{font-size:1.02em;line-height:1.35}'
+    '.mt{color:#9aa0ab;font-size:.8em;margin-top:.3em;display:flex;gap:.6em;flex-wrap:wrap}'
+    '.st{border-radius:5px;padding:0 .4em;background:#2b3240;color:#cfe3ff}'
+    '.st.p{background:#3a3320;color:#f0d68a}'
+    '.pusto{color:#8a93a0;text-align:center;margin:3em 1em}'
+    '.stopka{color:#8a93a0;font-size:.8em;text-align:center;margin:2em 0}'
+)
+
+
+def render_przesluchania_page(wiersze: list, zakladka: str) -> str:
+    lic = _prz_licznik(wiersze)
+    tabs = ''.join(
+        f'<button data-z="{z}" class="{"on" if z == zakladka else ""}">'
+        f'{_esc(_prz.NAZWY_ZAKLADEK[z])} ({lic[z]})</button>' for z in _prz.ZAKLADKI)
+    pokaz = sorted((w for w in wiersze if w['zakladka'] == zakladka),
+                   key=lambda w: (w['projekt'].lower(), -w['mtime']))
+    czesci, projekt = [], None
+    for w in pokaz:
+        if w['projekt'] != projekt:
+            projekt = w['projekt']
+            czesci.append(f'<div class="prj">{_esc(projekt or "(katalog główny)")}</div>')
+        znaczniki = [f'<span class="st{" p" if w["zrodlo"] == "propozycja" else ""}">'
+                     f'{_esc(_prz.NAZWY_STATUSOW.get(w["status"], w["status"]))}'
+                     + (' · propozycja' if w['zrodlo'] == 'propozycja' else '') + '</span>']
+        if w['rodzaj']:
+            znaczniki.append(_esc(w['rodzaj']))
+        znaczniki.append(datetime.fromtimestamp(w['mtime']).strftime('%d.%m.%Y'))
+        if w['nagranie']:
+            znaczniki.append('🔊 nagranie')
+        if w['odsluch'].get('odsluchane'):
+            znaczniki.append('🎧 odsłuchane')
+        if w['nieprzeniesiona']:
+            znaczniki.append('⏳ czeka na przeniesienie do vaulta')
+        czesci.append(
+            f'<a class="row" href="{w["url"]}?sluchaj=1"><div class="tt">{_esc(w["tytul"])}'
+            f'</div><div class="mt">{"".join(f"<span>{z}</span>" for z in znaczniki)}'
+            '</div></a>')
+    tresc = ''.join(czesci) or (
+        f'<div class="pusto">Brak notatek w zakładce „{_esc(_prz.NAZWY_ZAKLADEK[zakladka])}”.'
+        '</div>')
+    nieprz = len(_PRZ_MAGAZYN.nieprzeniesione())
+    return (
+        '<!doctype html><meta charset=utf-8>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>Do przesłuchania ({lic["decyzja"]})</title><style>{PRZ_STYLE}</style>'
+        f'<div class="hd"><div class="bar">{_link_startowy()}'
+        '<a href="/">📁 pliki</a>'
+        '<a href="/?przesluchania=1&odswiez=1" title="Wczytaj vault od nowa">🔄</a>'
+        f'<span style="font-weight:600">Do przesłuchania</span></div>'
+        f'<div class="tabs">{tabs}</div></div>'
+        f'<div class="lst">{tresc}'
+        f'<div class="stopka">Decyzje nieprzeniesione do vaulta: {nieprz} · '
+        '<a href="/?przesluchania=eksport" style="color:#7ab7ff">eksport</a></div></div>'
+        '<script>' + JS_ZAPIS + '(function(){'
+        'document.querySelectorAll(".tabs button").forEach(b=>b.onclick=async()=>{'
+        'const z=b.dataset.z;'
+        'try{await afFetch("/?przesluchania=ui",{method:"POST",'
+        'headers:{"Content-Type":"application/json"},body:JSON.stringify({zakladka:z})});}'
+        'catch(e){}location.href="/?przesluchania=1&z="+z;});'
+        '})();</script>')
+
+
+def _zdania_lektora(cues_path: Path):
+    """(HTML zdań <span class=s>, czasy jako literał JS, liczba zdań) z pliku
+    czasów zdań lektora — wspólne dla ?read=1 i widoku ?sluchaj=1."""
+    import json as _json
+    try:
+        cues = _json.loads(cues_path.read_text(encoding='utf-8'))
+    except Exception:
+        cues = []
+    spans = ' '.join(f'<span class=s data-i="{i}" onclick="seek({i})">'
+                     f'{_esc(c.get("text", ""))}</span>' for i, c in enumerate(cues))
+    times_js = '[' + ','.join(f'{float(c.get("t", 0)):.2f}' for c in cues) + ']'
+    return spans, times_js, len(cues)
+
+
+# podświetlanie bieżącego zdania wg pozycji audio — wymaga zmiennych au
+# (element <audio>) i T (czasy zdań) zadeklarowanych wcześniej w skrypcie
+JS_PODSWIETLANIE = (
+    'const sp=[...document.querySelectorAll(".s")];let cur=-1;'
+    'function hi(i){if(i===cur)return;'
+    'if(cur>=0&&sp[cur])sp[cur].classList.remove("cur");cur=i;'
+    'if(i>=0&&sp[i]){sp[i].classList.add("cur");'
+    'sp[i].scrollIntoView({block:"center",behavior:"smooth"});}}'
+    'au.addEventListener("timeupdate",function(){'
+    'const t=au.currentTime;let lo=0,h=T.length-1,k=-1;'
+    'while(lo<=h){const m=(lo+h)>>1;if(T[m]<=t){k=m;lo=m+1;}else h=m-1;}'
+    'hi(k);});'
+    'window.seek=function(i){au.currentTime=T[i]+0.02;au.play();};')
+
+SLUCHAJ_STYLE = (
+    PRZ_STYLE +
+    'audio{width:100%;display:block;background:#1d2027}'
+    '#txt{max-width:760px;margin:0 auto;padding:1em 1.1em 2em;line-height:1.9;'
+    'font-size:1.08em}'
+    '#txt h1{font-size:1.45em;line-height:1.3}#txt h2{font-size:1.25em;line-height:1.3}'
+    '#txt h3,#txt h4{font-size:1.1em;line-height:1.3}'
+    '#txt img{max-width:100%}#txt table{border-collapse:collapse;display:block;'
+    'overflow-x:auto}#txt td,#txt th{border:1px solid #343a45;padding:.25em .5em}'
+    '#txt pre{white-space:pre-wrap;background:#1d2027;padding:.6em;border-radius:6px}'
+    '.s{cursor:pointer;padding:.04em .12em;border-radius:4px}'
+    '.s.cur{background:#1a5fb4;color:#fff}'
+    '.dec{max-width:760px;margin:0 auto;padding:1em 1.1em 40vh;border-top:1px solid #2a2f38}'
+    '.dec .stan{color:#9aa0ab;font-size:.85em;margin-bottom:.7em}'
+    '.przyc{display:flex;gap:.5em;flex-wrap:wrap}'
+    '.przyc button{flex:1 1 30%;min-height:52px;font:inherit;font-size:1em;'
+    'border-radius:10px;border:1px solid #343a45;color:#fff;cursor:pointer}'
+    '#bak{background:#1d6b3a}#bpop{background:#7a5a10}#bodr{background:#7a1f1f}'
+    'textarea{width:100%;box-sizing:border-box;min-height:6em;margin-top:.7em;'
+    'background:#1d2027;color:#e8e9ec;border:1px solid #343a45;border-radius:8px;'
+    'font:inherit;padding:.5em}'
+    '#zap{display:none;margin-top:.5em;min-height:48px;width:100%;font:inherit;'
+    'background:#1a5fb4;color:#fff;border:0;border-radius:10px}'
+    '#msg{margin-top:.7em;min-height:1.4em}'
+)
+
+
+def render_sluchaj_page(target: Path, wiersz: dict) -> str:
+    """Widok jednoczesny: tekst (zdania podświetlane, gdy jest nagranie z
+    czasami zdań) + odtwarzacz + decyzja z uwagą. Pozycja odtwarzania i stan
+    „odsłuchane” zapisywane na serwerze — wspólne dla urządzeń, przeżywają F5."""
+    src = target.read_text(encoding='utf-8', errors='replace')
+    aud = _lektor_audio_for(target, exports=True)
+    cue = _lektor_cues_for(target, aud) if aud is not None else None
+    times_js = '[]'
+    if cue is not None:
+        body, times_js, n = _zdania_lektora(cue)
+        opis = f'📖 {n} zdań'
+    else:
+        tresc = _prz.tresc_bez_naglowka(src)
+        body = (_fix_md_imgs(_md_render(tresc), target.parent) if _markdown is not None
+                else f'<pre>{_esc(tresc)}</pre>')
+        opis = '🔊 brak nagrania — dotknij „🔊 lektor”' if aud is None else '🔊 nagranie bez czasów zdań'
+    audio_html = (f'<audio id="au" controls preload="metadata" src="{_url_abs(aud)}"></audio>'
+                  if aud is not None else '')
+    ost = wiersz.get('ostatnia')
+    stan = (f'Status: <b>{_esc(_prz.NAZWY_STATUSOW.get(wiersz["status"], wiersz["status"]))}'
+            f'</b>' + (' (propozycja klasyfikacji)' if wiersz['zrodlo'] == 'propozycja' else ''))
+    if ost is not None and wiersz['zrodlo'] == 'decyzja':
+        stan += (f' · Twoja decyzja {_esc(ost["utworzono"])}: '
+                 f'{_esc(_prz.NAZWY_DECYZJI[ost["decyzja"]])}'
+                 + (f' — „{_esc(ost["uwaga"])}”' if ost['uwaga'] else '')
+                 + (' · ⏳ czeka na przeniesienie do vaulta' if wiersz['nieprzeniesiona'] else ''))
+    if wiersz['odsluch'].get('odsluchane'):
+        stan += f' · 🎧 odsłuchane {_esc(wiersz["odsluch"]["odsluchane"])}'
+    q = quote(target.name)
+    poz = float(wiersz['odsluch'].get('pozycja_s', 0) or 0)
+    return (
+        '<!doctype html><meta charset=utf-8>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{_esc(wiersz["tytul"])}</title><style>{SLUCHAJ_STYLE}</style>'
+        '<div class="hd"><div class="bar">'
+        '<a href="/?przesluchania=1">📋 lista</a>'
+        f'{_link_startowy()}<a href="{q}?view=1">📘 podgląd</a>'
+        '<a href="#dec" title="Przewiń do decyzji">⬇ decyzja</a>'
+        + _lektor_przycisk(target, aud) +
+        f'<span style="color:#6fce8f;font-size:.85em">{opis}</span></div>'
+        f'{audio_html}</div>'
+        f'<div id="txt">{body}</div>'
+        '<div class="dec" id="dec">'
+        f'<div class="stan">{stan}</div>'
+        '<div class="przyc"><button id="bak" data-d="akceptuje">✔ Akceptuję</button>'
+        '<button id="bpop" data-d="do-poprawy">✎ Do poprawy</button>'
+        '<button id="bodr" data-d="odrzuca">✖ Odrzucam</button></div>'
+        '<textarea id="uw" maxlength="4000" placeholder="Uwaga (przy „Do poprawy” '
+        'wymagana) — pisz albo dyktuj mikrofonem klawiatury"></textarea>'
+        '<button id="zap">Zapisz „Do poprawy” z uwagą</button>'
+        '<div id="msg"></div></div>'
+        '<script>' + JS_ZAPIS + '(function(){'
+        f'const T={times_js};const P={poz:.1f};const N={_json_do_script(target.name)};'
+        'const msg=document.getElementById("msg"),uw=document.getElementById("uw"),'
+        'zap=document.getElementById("zap");'
+        'async function wyslij(d){msg.textContent="⏳ zapisuję…";'
+        'try{const r=await afFetch(encodeURIComponent(N)+"?decyzja=1",{method:"POST",'
+        'headers:{"Content-Type":"application/json"},'
+        'body:JSON.stringify({decyzja:d,uwaga:uw.value})});'
+        'if(r.ok){msg.textContent="✓ zapisano — wracam do listy";'
+        'setTimeout(()=>location.href="/?przesluchania=1",1200);}'
+        'else{msg.textContent="❌ "+await r.text();}}'
+        'catch(e){msg.textContent="❌ brak połączenia — decyzja NIE zapisana";}}'
+        'document.querySelectorAll(".przyc button").forEach(b=>b.onclick=()=>{'
+        'const d=b.dataset.d;'
+        'if(d==="do-poprawy"&&!uw.value.trim()){zap.style.display="block";uw.focus();'
+        'msg.textContent="Wpisz uwagę: co poprawić?";return;}wyslij(d);});'
+        'zap.onclick=()=>{if(!uw.value.trim()){uw.focus();return;}wyslij("do-poprawy");};'
+        'const au=document.getElementById("au");if(!au)return;'
+        + JS_PODSWIETLANIE +
+        'let ost=0,kon=false;'
+        'function zapisz(k){afFetch(encodeURIComponent(N)+"?odsluch=1",{method:"POST",'
+        'headers:{"Content-Type":"application/json"},'
+        'body:JSON.stringify({pozycja:au.currentTime,koniec:!!k})}).catch(()=>{});}'
+        'au.addEventListener("loadedmetadata",()=>{if(P>1&&P<(au.duration||0)-2)'
+        'au.currentTime=P;});'
+        'au.addEventListener("timeupdate",()=>{const t=au.currentTime;'
+        'if(!kon&&au.duration&&t>=0.95*au.duration){kon=true;zapisz(true);return;}'
+        'if(Math.abs(t-ost)>=10){ost=t;zapisz(false);}});'
+        'au.addEventListener("pause",()=>zapisz(false));'
+        'au.addEventListener("ended",()=>{kon=true;zapisz(true);});'
+        '})();</script>')
+
+
+async def sluchaj_get(request, target: Path):
+    odm = _prz_niedostepne()
+    if odm is not None:
+        return odm
+    nt, odm = _prz_notatka(request)
+    if odm is not None:
+        return odm
+    target, rel = nt
+    wiersze = {w['sciezka']: w for w in _prz_wiersze(await _prz_notatki())}
+    w = wiersze.get(rel)
+    if w is None:
+        # notatka spoza listy (bez statusu) — widok działa, decyzja też
+        tekst = target.read_text(encoding='utf-8', errors='replace')
+        n = {'sciezka': rel, 'plik': target, 'tytul': _prz.tytul(tekst, target.name),
+             'projekt': '', 'rodzaj': '', 'status_zrodlowy': 'do-akceptacji',
+             'zrodlo_statusu': 'brak', 'odcisk': _prz.odcisk(tekst),
+             'mtime': target.stat().st_mtime}
+        w = _prz_wiersze([n])[0]
+    return web.Response(text=render_sluchaj_page(target, w), content_type='text/html',
+                        headers={'Cache-Control': 'no-store'})
+
+
+
 async def _serve_file(request, target):
     if 'dl' in request.query:
         return web.FileResponse(target, headers={
@@ -4306,6 +4866,9 @@ async def _serve_file(request, target):
             'Content-Type': 'application/pdf',
             'Content-Disposition': f"inline; filename*=UTF-8''{quote(target.stem)}.pdf",
             'Cache-Control': 'no-cache'})
+
+    if 'sluchaj' in request.query:
+        return await sluchaj_get(request, target)
 
     if 'read' in request.query:
         aud = _lektor_audio_for(target, exports=True)
@@ -4591,6 +5154,15 @@ def utworz_aplikacje(k):
     _LEKTOR_LOCK = None
     _LEKTOR_PAUSED = False
     _LEKTOR_SHUTDOWN = False
+    # lista „Do przesłuchania”: stan z pliku w katalogu danych
+    global _PRZ_MAGAZYN
+    _PRZ_MAGAZYN = None
+    _PRZ_SKAN.update(t=0.0, dane=None)
+    if k.modul('przesluchania'):
+        _PRZ_MAGAZYN = _prz.Magazyn(k.przesluchania_stan, k.przesluchania_eksport)
+        if _PRZ_MAGAZYN.uszkodzony:
+            _evlog('przesluchania', f'stan nieczytelny: {_PRZ_MAGAZYN.uszkodzony}',
+                   level='error')
     # client_max_size: ciało żądania wczytywane do pamięci (request.read/post/json)
     # — małe; wgrywanie czyta strumieniowo z własnym licznikiem (upload)
     app = web.Application(middlewares=[errlog, straz_zrodla, auth, straz_ukrytych],
@@ -4602,6 +5174,8 @@ def utworz_aplikacje(k):
     app.on_startup.append(_cleanup_parts)         # potem sprzątaj porzucone
     app.on_startup.append(_pamiec_start)
     app.on_startup.append(_soffice_start)          # piaskownica sieci soffice (C9)
+    app.on_startup.append(_wygasanie_start)        # nagrania lektora po N dniach
+    app.on_cleanup.append(_wygasanie_stop)
     app.on_cleanup.append(_pamiec_stop)
     app.on_cleanup.append(_dziennik_stop)
     app.router.add_get('/{path:.*}', serve)

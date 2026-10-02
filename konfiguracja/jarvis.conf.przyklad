@@ -49,6 +49,9 @@ strona_startowa =
 # zdarzeń, zamiast czekać na zawieszony zdalny system plików (np. sshfs do wyłączonego komputera).
 # Błąd systemu plików (urządzenie odmontowane, brak połączenia) → 503. Dozwolona wartość ułamkowa.
 limit_odczytu_katalogu_s = 3
+# Nagrania lektora w katalog_lektora starsze niż tyle dni serwer usuwa sam (sprawdzenie przy starcie
+# i co godzinę; wpis w rejestrze zdarzeń). Usunięte nagranie można wygenerować ponownie. 0 = nie wygasają.
+wiek_nagran_dni = 3
 
 [katalogi]
 katalog_glowny   = /srv/anberfiles/korzen
@@ -69,6 +72,13 @@ kosz             = /srv/anberfiles/dane/kosz
 # w drzewie zostaje, listing po kliknięciu działa normalnie. Puste = rozwijane wszystkie.
 # Przykład: bez_drzewa = nazwa-katalogu-1, nazwa-katalogu-2
 bez_drzewa       =
+# Lista „Do przesłuchania” (moduł przesluchania): katalog notatek (musi leżeć w katalog_glowny)
+# i opcjonalny plik propozycji klasyfikacji — tabela Markdown z wierszami | `ścieżka` | rodzaj | status |,
+# ścieżki względem przesluchania_zakres. Notatka trafia na listę, gdy ma w nagłówku status: do-akceptacji
+# (albo zaakceptowane-niewdrozone) albo gdy jest w pliku propozycji. Decyzje: katalog_danych/przesluchania.json,
+# eksport dla agenta przenoszącego je do vaulta: katalog_danych/przesluchania-eksport.md.
+przesluchania_zakres    = /srv/anberfiles/korzen/vault
+przesluchania_kandydaci =
 
 [moduly]
 podglad_docx    = tak
@@ -79,3 +89,4 @@ wylaczanie      = nie
 druk            = tak
 bateria         = nie
 kadrowanie      = nie
+przesluchania   = tak            ; lista „Do przesłuchania” z decyzjami (Anbernic: domyślnie nie)

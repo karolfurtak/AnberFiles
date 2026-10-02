@@ -22,7 +22,10 @@ def test_bez_pliku_ustawien_wartosci_anbernica():
     assert k.tylko_odczyt is False
     assert k.katalog_lektora is None
     assert k.logowanie == 'basic'
-    assert all(k.modul(n) for n in konfiguracja.MODULY)
+    # konsola: moduły włączone poza tymi, które z założenia jej nie dotyczą
+    assert all(k.modul(n) for n in konfiguracja.MODULY
+               if n not in konfiguracja.MODULY_DOMYSLNIE_WYLACZONE)
+    assert not k.modul('przesluchania')
     # dzisiejsze ścieżki konsoli, jedna po drugiej
     assert k.rejestr_zdarzen == Path('/mnt/data/anberfiles-events.log')
     assert k.kolejka_lektora == Path('/mnt/data/lektor_queue.json')

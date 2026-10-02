@@ -35,7 +35,9 @@ PLIK_HASLA_PODPOWIEDZ = '/etc/anberfiles/haslo.env'
 LOGOWANIE = ('basic', 'formularz')
 
 MODULY = ('podglad_docx', 'eksport_docx', 'lektor', 'lektor_opisy_ai',
-          'wylaczanie', 'druk', 'bateria', 'kadrowanie')
+          'wylaczanie', 'druk', 'bateria', 'kadrowanie', 'przesluchania')
+# moduły WYŁĄCZONE, gdy plik ustawień o nich milczy (konsola Anbernic bez nich)
+MODULY_DOMYSLNIE_WYLACZONE = ('przesluchania',)
 
 KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
@@ -43,12 +45,12 @@ KLUCZE = {
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
                'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci',
                'limit_druku_na_godzine', 'strona_startowa',
-               'limit_odczytu_katalogu_s'),
+               'limit_odczytu_katalogu_s', 'wiek_nagran_dni'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
                  'katalog_eksportu', 'favikona', 'kosz', 'dziennik_dostepu',
-                 'bez_drzewa'),
+                 'bez_drzewa', 'przesluchania_zakres', 'przesluchania_kandydaci'),
     'moduly': MODULY,
 }
 
@@ -107,6 +109,13 @@ class Konfiguracja:
     # nazwy katalogów PIERWSZEGO poziomu katalogu głównego, których poddrzewa
     # eksplorator nie rozwija (listing po kliknięciu działa normalnie)
     bez_drzewa: tuple = ()
+    # nagrania lektora w katalog_lektora starsze niż tyle dni serwer usuwa
+    # (sprawdzenie co godzinę + przy starcie); 0 = nagrania nie wygasają
+    wiek_nagran_dni: int = 0
+    # lista „Do przesłuchania” (moduł przesluchania): katalog notatek (vault)
+    # i opcjonalny plik propozycji klasyfikacji (tabela Markdown)
+    przesluchania_zakres: 'Path | None' = None
+    przesluchania_kandydaci: 'Path | None' = None
 
     @property
     def katalog_auth(self) -> Path:
@@ -116,7 +125,17 @@ class Konfiguracja:
     def modul(self, nazwa: str) -> bool:
         if nazwa not in MODULY:
             raise KeyError(f'nieznany moduł: {nazwa}')
-        return bool(self.moduly.get(nazwa, True))
+        return bool(self.moduly.get(nazwa, nazwa not in MODULY_DOMYSLNIE_WYLACZONE))
+
+    @property
+    def przesluchania_stan(self) -> Path:
+        """Decyzje, odsłuch i ustawienia widoku listy (JSON, zapis atomowy)."""
+        return self.katalog_danych / 'przesluchania.json'
+
+    @property
+    def przesluchania_eksport(self) -> Path:
+        """Decyzje do przeniesienia do vaulta — plik dla agenta laptopa."""
+        return self.katalog_danych / 'przesluchania-eksport.md'
 
     @property
     def czytaj_tts(self) -> Path:
@@ -158,6 +177,17 @@ def _dodatnia(klucz: str, tekst: str) -> int:
                                'całkowita') from None
     if v < 1:
         raise BladKonfiguracji(f'[serwer] {klucz} = {v}: wymagana liczba dodatnia')
+    return v
+
+
+def _nieujemna(klucz: str, tekst: str) -> int:
+    try:
+        v = int(str(tekst).strip())
+    except ValueError:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: wymagana liczba '
+                               'całkowita') from None
+    if v < 0:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {v}: wymagana liczba ≥ 0')
     return v
 
 
@@ -321,7 +351,8 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         favikona=sciezka_k('favikona', dane / 'dev-skills' / 'favicons' / 'favicon.ico'),
         kosz=sciezka_k('kosz', glowny / '.kosz'),
         dziennik_dostepu=sciezka_k('dziennik_dostepu', dane / 'access.log'),
-        moduly={n: _bool('moduly', n, m.get(n, 'tak')) for n in MODULY},
+        moduly={n: _bool('moduly', n, m.get(
+            n, 'nie' if n in MODULY_DOMYSLNIE_WYLACZONE else 'tak')) for n in MODULY},
         zrodlo=zrodlo,
         logowanie=logowanie,
         limit_wgrywania_mb=_dodatnia('limit_wgrywania_mb',
@@ -339,6 +370,11 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         limit_odczytu_katalogu_s=_dodatnia_liczba(
             'limit_odczytu_katalogu_s', s.get('limit_odczytu_katalogu_s', '3')),
         bez_drzewa=_nazwy_katalogow('bez_drzewa', k.get('bez_drzewa', '')),
+        wiek_nagran_dni=_nieujemna('wiek_nagran_dni', s.get('wiek_nagran_dni', '0')),
+        przesluchania_zakres=(Path(k['przesluchania_zakres'])
+                              if k.get('przesluchania_zakres') else None),
+        przesluchania_kandydaci=(Path(k['przesluchania_kandydaci'])
+                                 if k.get('przesluchania_kandydaci') else None),
     )
 
 
@@ -383,6 +419,14 @@ def sprawdz_przy_starcie(k: Konfiguracja) -> list:
         rodzic = getattr(k, nazwa).parent
         if not rodzic.is_dir():
             bledy.append(f'{nazwa}: katalog {rodzic} nie istnieje.')
+    if k.modul('przesluchania'):
+        z = k.przesluchania_zakres
+        if z is None:
+            bledy.append('moduł przesluchania włączony, a przesluchania_zakres '
+                         'jest pusty — lista nie wie, gdzie szukać notatek.')
+        elif k.katalog_glowny.is_dir() and not _w_katalogu(z, k.katalog_glowny):
+            bledy.append(f'przesluchania_zakres {z} leży poza katalog_glowny '
+                         f'{k.katalog_glowny} — notatek nie dałoby się otworzyć.')
     if k.katalog_lektora is not None and k.katalog_glowny.is_dir() \
             and not _w_katalogu(k.katalog_lektora, k.katalog_glowny):
         bledy.append(f'katalog_lektora {k.katalog_lektora} leży poza '
