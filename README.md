@@ -155,6 +155,11 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   godzinę w oknie przesuwnym, ponad → 429 z `Retry-After`; druk `.md` bez
   `export_to_docx.py` w katalogu eksportu → 400 z przyczyną (zamiast cichej awarii
   w `print_errors.log`).
+- Duże i zdalne katalogi: `limit_odczytu_katalogu_s` (`[serwer]`, domyślnie 3, wartość
+  ułamkowa dozwolona) — czas na odczyt katalogu; po nim 504 ze stroną po polsku i wpisem
+  w rejestrze zdarzeń (błąd systemu plików → 503), a reszta serwera odpowiada normalnie.
+  `bez_drzewa` (`[katalogi]`, domyślnie puste) — nazwy katalogów pierwszego poziomu
+  katalogu głównego, których poddrzewa eksplorator (`?explorer=1`) nie rozwija.
 - Dziennik dostępu: `katalog_danych/access.log` (klucz `[katalogi] dziennik_dostepu`;
   na konsoli `/mnt/data/access.log`) — linia na żądanie: czas, adres, metoda, ścieżka
   z zapytaniem, kod, bajty treści, czas obsługi; rotacja 5 × 5 MB (`access.log.1`…`.5`).

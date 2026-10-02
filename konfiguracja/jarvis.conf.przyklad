@@ -45,6 +45,10 @@ limit_druku_na_godzine = 20      ; zadań druku na godzinę (okno przesuwne), po
 # odnośnik do strony startowej serwera. Tylko adres http:// lub https://; puste = brak linku.
 # Przykład: strona_startowa = http://adres-serwera:port/
 strona_startowa =
+# Czas (s) na odczyt katalogu; po nim serwer odpowiada 504 z czytelną stroną i wpisem w rejestrze
+# zdarzeń, zamiast czekać na zawieszony zdalny system plików (np. sshfs do wyłączonego komputera).
+# Błąd systemu plików (urządzenie odmontowane, brak połączenia) → 503. Dozwolona wartość ułamkowa.
+limit_odczytu_katalogu_s = 3
 
 [katalogi]
 katalog_glowny   = /srv/anberfiles/korzen
@@ -60,6 +64,11 @@ katalog_zip_tmp  = /srv/anberfiles/dane/zip_tmp
 katalog_eksportu = /srv/anberfiles/eksport          ; czytaj_tts.py + lektor-ustawienia.conf
 favikona         = /srv/anberfiles/dane/favicon.ico
 kosz             = /srv/anberfiles/dane/kosz
+# bez_drzewa: nazwy (po przecinku) katalogów PIERWSZEGO poziomu katalog_glowny, których poddrzewa
+# eksplorator (?explorer=1) nie rozwija — dla bardzo dużych lub zdalnych zasobów. Wpis katalogu
+# w drzewie zostaje, listing po kliknięciu działa normalnie. Puste = rozwijane wszystkie.
+# Przykład: bez_drzewa = nazwa-katalogu-1, nazwa-katalogu-2
+bez_drzewa       =
 
 [moduly]
 podglad_docx    = tak

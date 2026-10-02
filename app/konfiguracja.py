@@ -18,6 +18,7 @@ standardowa.
 """
 import configparser
 import ipaddress
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -41,11 +42,13 @@ KLUCZE = {
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
                'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci',
-               'limit_druku_na_godzine', 'strona_startowa'),
+               'limit_druku_na_godzine', 'strona_startowa',
+               'limit_odczytu_katalogu_s'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
-                 'katalog_eksportu', 'favikona', 'kosz', 'dziennik_dostepu'),
+                 'katalog_eksportu', 'favikona', 'kosz', 'dziennik_dostepu',
+                 'bez_drzewa'),
     'moduly': MODULY,
 }
 
@@ -98,6 +101,12 @@ class Konfiguracja:
     # adres strony startowej serwera (link „🏠 <nazwa instancji>” w paskach widoków);
     # pusty = brak linku (konsola Anbernic)
     strona_startowa: str = ''
+    # czas (s) na odczyt katalogu, zanim serwer odpowie 504 (zdalny system plików
+    # potrafi zawisnąć); wartość ułamkowa dozwolona
+    limit_odczytu_katalogu_s: float = 3.0
+    # nazwy katalogów PIERWSZEGO poziomu katalogu głównego, których poddrzewa
+    # eksplorator nie rozwija (listing po kliknięciu działa normalnie)
+    bez_drzewa: tuple = ()
 
     @property
     def katalog_auth(self) -> Path:
@@ -150,6 +159,33 @@ def _dodatnia(klucz: str, tekst: str) -> int:
     if v < 1:
         raise BladKonfiguracji(f'[serwer] {klucz} = {v}: wymagana liczba dodatnia')
     return v
+
+
+def _dodatnia_liczba(klucz: str, tekst: str) -> float:
+    """Liczba rzeczywista > 0 (skończona)."""
+    try:
+        v = float(str(tekst).strip().replace(',', '.'))
+    except ValueError:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: wymagana '
+                               'liczba') from None
+    if not math.isfinite(v) or v <= 0:
+        raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: wymagana '
+                               'liczba dodatnia')
+    return v
+
+
+def _nazwy_katalogow(klucz: str, tekst: str) -> tuple:
+    """Lista nazw katalogów po przecinku; bez „/", „\\" i „.."."""
+    wynik = []
+    for s in tekst.split(','):
+        s = s.strip()
+        if not s:
+            continue
+        if '/' in s or '\\' in s or '..' in s or s == '.':
+            raise BladKonfiguracji(f'[katalogi] {klucz}: {s!r} nie jest nazwą '
+                                   'katalogu pierwszego poziomu (bez „/" i „..")')
+        wynik.append(s)
+    return tuple(wynik)
 
 
 def _sieci(klucz: str, tekst: str) -> tuple:
@@ -300,6 +336,9 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         limit_druku_na_godzine=_dodatnia('limit_druku_na_godzine',
                                          s.get('limit_druku_na_godzine', '20')),
         strona_startowa=_adres_http('strona_startowa', s.get('strona_startowa', '')),
+        limit_odczytu_katalogu_s=_dodatnia_liczba(
+            'limit_odczytu_katalogu_s', s.get('limit_odczytu_katalogu_s', '3')),
+        bez_drzewa=_nazwy_katalogow('bez_drzewa', k.get('bez_drzewa', '')),
     )
 
 

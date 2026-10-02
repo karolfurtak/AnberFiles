@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 import asyncio
 import collections
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import logging
@@ -2500,7 +2501,11 @@ def _tree_html(p, depth=0, maxdepth=10):
         except Exception:
             continue
         url = '/' + quote(rel, safe='/') + '/'
-        sub = _tree_html(d, depth + 1, maxdepth)
+        # [katalogi] bez_drzewa: wpis katalogu pierwszego poziomu zostaje, dzieci nie
+        if depth == 0 and d.name in KONF.bez_drzewa:
+            sub = ''
+        else:
+            sub = _tree_html(d, depth + 1, maxdepth)
         tog = ('<span class=tg onclick="tg(this)">▸</span>' if sub
                else '<span class="tg e"></span>')
         out.append(f'<li data-p="{url}">{tog}'
@@ -2746,6 +2751,82 @@ async def _zip_dir(request, target: Path):
             pass
 
 
+# ── Odczyt katalogu z limitem czasu (zdalne systemy plików) ──────────────────
+# Osobna pula wątków: zawieszone wywołanie systemowe zajmuje wątek aż do
+# odmontowania zasobu, więc nie może wyczerpać puli domyślnej pętli.
+_EXEC_FS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='anberfiles-fs')
+
+
+class _OdczytKatalogu(Exception):
+    def __init__(self, odpowiedz):
+        super().__init__()
+        self.odpowiedz = odpowiedz
+
+
+def _proba_katalogu(p):
+    """Próba odczytu: scandir + stat() każdego wpisu (to, co zrobi listing)."""
+    with os.scandir(p) as it:
+        for e in it:
+            try:
+                e.stat()
+            except FileNotFoundError:        # wpis zniknął / zerwany symlink
+                continue
+
+
+def _zbadaj_sciezke(raw):
+    """(cel, istnieje, jest_katalogiem); dla katalogu także próba odczytu.
+    Blokujące — wołać tylko przez _zbadaj_z_limitem."""
+    target = (ROOT / raw).resolve()
+    if ROOT not in target.parents and target != ROOT:
+        return target, False, False
+    if not target.exists():
+        return target, False, False
+    jest_kat = target.is_dir()
+    if jest_kat:
+        _proba_katalogu(target)
+    return target, True, jest_kat
+
+
+def _strona_katalogu_niedostepnego(raw, status, tytul, przyczyna=''):
+    rodzic = '/'.join(raw.split('/')[:-1])
+    rodzic_url = '/' + quote(rodzic, safe='/') + ('/' if rodzic else '')
+    szczegol = (f'<p>Przyczyna: {_html.escape(przyczyna)}</p>' if przyczyna else '')
+    html = ('<!doctype html><meta charset=utf-8>'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Katalog niedostępny — AnberFiles</title>'
+            '<body style="font-family:system-ui,sans-serif;margin:1.5em">'
+            f'<h2>{_html.escape(tytul)}</h2>{szczegol}'
+            f'<p><a href="{_html.escape(rodzic_url)}">↑ katalog nadrzędny</a></p>')
+    return web.Response(status=status, text=html, content_type='text/html',
+                        headers={'Cache-Control': 'no-store'})
+
+
+async def _zbadaj_z_limitem(raw):
+    """Wynik _zbadaj_sciezke albo _OdczytKatalogu z odpowiedzią 504 (limit
+    czasu) / 503 (błąd systemu plików). Inne wyjątki (np. zły znak w ścieżce)
+    przechodzą dalej."""
+    limit = KONF.limit_odczytu_katalogu_s
+    loop = asyncio.get_running_loop()
+    opis_sciezki = '/' + raw
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_EXEC_FS, _zbadaj_sciezke, raw), limit)
+    except asyncio.TimeoutError:
+        _evlog('katalog', f'{opis_sciezki}: brak odpowiedzi w {limit:g} s '
+                          '(504)', 'warn')
+        raise _OdczytKatalogu(_strona_katalogu_niedostepnego(
+            raw, 504, f'Katalog nie odpowiada w {limit:g} s — urządzenie zdalne '
+                      'jest wyłączone albo poza siecią. Spróbuj ponownie za '
+                      'chwilę.')) from None
+    except OSError as e:
+        przyczyna = e.strerror or type(e).__name__
+        _evlog('katalog', f'{opis_sciezki}: błąd odczytu ({przyczyna}) (503)', 'warn')
+        raise _OdczytKatalogu(_strona_katalogu_niedostepnego(
+            raw, 503, 'Katalog nie jest dostępny — urządzenie zdalne jest '
+                      'wyłączone albo poza siecią. Spróbuj ponownie za chwilę.',
+            przyczyna)) from None
+
+
 async def serve(request):
     # widok/stan kolejki lektora (dostępny z dowolnej ścieżki)
     if 'lektorq' in request.query or 'lektorqj' in request.query:
@@ -2781,17 +2862,21 @@ async def serve(request):
         return web.Response(text=FAVICON_SVG, content_type='image/svg+xml',
                             headers={'Cache-Control': 'public, max-age=86400'})
 
+    # ustalenie ścieżki i próba odczytu katalogu — w wątku, z limitem czasu
+    # (zdalny system plików potrafi zawisnąć; pętla zdarzeń nie może czekać)
     try:
-        target = (ROOT / raw).resolve()
+        target, istnieje, jest_katalogiem = await _zbadaj_z_limitem(raw)
+    except _OdczytKatalogu as e:
+        return e.odpowiedz
     except Exception:
         return web.Response(status=400)
     # path traversal guard
     if ROOT not in target.parents and target != ROOT:
         return web.Response(status=403)
-    if not target.exists():
+    if not istnieje:
         return web.Response(status=404, text=f'Not found: {raw}')
 
-    if 'explorer' in request.query and target.is_dir():
+    if 'explorer' in request.query and jest_katalogiem:
         su = '/' + quote(raw, safe='/') + ('/' if raw else '')
         return web.Response(text=render_explorer_page(su),
                             content_type='text/html',
@@ -2804,10 +2889,10 @@ async def serve(request):
                        and not x.name.startswith('.')), key=_natkey)
         return web.json_response(sibs, headers={'Cache-Control': 'no-cache'})
 
-    if 'zip' in request.query and target.is_dir():
+    if 'zip' in request.query and jest_katalogiem:
         return await _zip_dir(request, target)
 
-    if target.is_dir():
+    if jest_katalogiem:
         items = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), _natkey(p.name)))
         rel = target.relative_to(ROOT)
         rel_url = f'/{rel}/' if str(rel) != '.' else '/'
