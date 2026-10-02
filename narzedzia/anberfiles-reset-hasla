@@ -43,10 +43,14 @@ VENV_DOMYSLNY = '/srv/anberfiles/venv'
 STRAZNIK = 'ANBERFILES_RESET_PRZELACZONY'
 
 
+def katalog_srodowiska(env=None) -> Path:
+    env = os.environ if env is None else env
+    return Path(env.get('ANBERFILES_VENV') or VENV_DOMYSLNY)
+
+
 def interpreter_srodowiska(env=None):
     """Ścieżka interpretera środowiska usługi albo None, gdy go nie ma."""
-    env = os.environ if env is None else env
-    p = Path(env.get('ANBERFILES_VENV') or VENV_DOMYSLNY) / 'bin' / 'python'
+    p = katalog_srodowiska(env) / 'bin' / 'python'
     return p if p.is_file() else None
 
 
@@ -59,8 +63,10 @@ def przelacz_na_srodowisko(argv):
     py = interpreter_srodowiska()
     if py is None:
         return False
+    # O środowisku decyduje sys.prefix, nie plik binarny: bin/python w venv
+    # bywa dowiązaniem do systemowego interpretera (samefile dałoby True).
     try:
-        if py.samefile(sys.executable):
+        if Path(sys.prefix).resolve() == katalog_srodowiska().resolve():
             return False
     except OSError:
         pass

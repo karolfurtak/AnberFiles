@@ -531,3 +531,42 @@ def test_reset_przelaczenie_bez_petli(tmp_path):
     py.chmod(0o755)                                  # PYTHONPATH z blokadą zostaje
     r = _reset_systemowy(conf, _bez_aiohttp(tmp_path), venv)
     assert r.returncode == 1 and 'aiohttp' in r.stderr
+
+
+def _wczytaj_reset():
+    ldr = importlib.machinery.SourceFileLoader('reset_hasla_test', str(RESET))
+    spec = importlib.util.spec_from_loader('reset_hasla_test', ldr)
+    mod = importlib.util.module_from_spec(spec)
+    ldr.exec_module(mod)
+    return mod
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='dowiązania i os.execv — tylko Linux')
+def test_przelaczenie_gdy_venv_to_dowiazanie_do_biezacego_interpretera(tmp_path, monkeypatch):
+    """RED przed naprawą: samefile(venv/bin/python, sys.executable) = True,
+    więc przełączenie pomijano. GREEN: decyduje sys.prefix, execv wywołany."""
+    venv = tmp_path / 'venv'
+    (venv / 'bin').mkdir(parents=True)
+    (venv / 'bin' / 'python').symlink_to(os.path.realpath(sys.executable))
+    (venv / 'pyvenv.cfg').write_text('include-system-site-packages = false\n')
+    monkeypatch.setenv('ANBERFILES_VENV', str(venv))
+    monkeypatch.delenv('ANBERFILES_RESET_PRZELACZONY', raising=False)
+    mod = _wczytaj_reset()
+    wywolania = []
+    monkeypatch.setattr(os, 'execv', lambda p, a: wywolania.append((p, a)))
+    mod.przelacz_na_srodowisko(['--conf', 'x'])
+    assert len(wywolania) == 1
+    assert wywolania[0][0] == str(venv / 'bin' / 'python')
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='dowiązania i os.execv — tylko Linux')
+def test_brak_przelaczenia_gdy_juz_w_srodowisku(tmp_path, monkeypatch):
+    venv = tmp_path / 'venv'
+    (venv / 'bin').mkdir(parents=True)
+    (venv / 'bin' / 'python').symlink_to(os.path.realpath(sys.executable))
+    monkeypatch.setenv('ANBERFILES_VENV', str(venv))
+    monkeypatch.delenv('ANBERFILES_RESET_PRZELACZONY', raising=False)
+    monkeypatch.setattr(sys, 'prefix', str(venv))
+    mod = _wczytaj_reset()
+    monkeypatch.setattr(os, 'execv', lambda p, a: pytest.fail('execv w pętli'))
+    assert mod.przelacz_na_srodowisko([]) is False
