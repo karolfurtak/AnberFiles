@@ -54,8 +54,9 @@ SCIEZKA_LOGOWANIA = '/__anberfiles/zaloguj'
 SCIEZKA_USTAWIENIA = '/__anberfiles/ustaw-haslo'
 SCIEZKA_WYLOGOWANIA = '/__anberfiles/wyloguj'
 
-# scrypt: 16 MiB pamięci na próbę (n·r·128 B) — ok. 0,1 s na Raspberry Pi 5
-SCRYPT = {'n': 2 ** 14, 'r': 8, 'p': 1, 'dlugosc': 32}
+# scrypt: 16 MiB pamięci na próbę (n·r·128 B, niezależnie od p); p=5 → ok. 0,5 s
+# na Raspberry Pi 5 (p=1 do 02.10.2026 — stare pliki weryfikowane parametrami z pliku)
+SCRYPT = {'n': 2 ** 14, 'r': 8, 'p': 5, 'dlugosc': 32}
 _SCRYPT_MAXMEM = 128 * 1024 ** 2
 
 # Sieci, z których wolno ustawić hasło przy pierwszym uruchomieniu

@@ -708,3 +708,30 @@ def test_lista_bez_tokenu_domyslnie_pusta(tmp_path):
                                                           '100.64.0.0/10')
     assert wczytaj(conf).ustaw_haslo_bez_tokenu == tuple(
         ipaddress.ip_network(s) for s in ('127.0.0.1/32', '192.168.0.0/16', '100.64.0.0/10'))
+
+
+# ── parametry scrypt (audyt C3) ─────────────────────────────────────────────
+
+def test_nowy_skrot_scrypt_p5(tmp_path):
+    import logowanie
+    katalog = tmp_path / 'auth'
+    assert logowanie.ustaw_haslo(katalog, HASLO_F)
+    d = json.loads((katalog / logowanie.PLIK_HASLA).read_text(encoding='utf-8'))
+    assert (d['n'], d['r'], d['p']) == (2 ** 14, 8, 5)
+    assert logowanie.sprawdz_haslo(katalog, HASLO_F)
+
+
+def test_stary_skrot_p1_nadal_weryfikowany(tmp_path):
+    """Plik sprzed zmiany (p=1) — parametry czytane z pliku, nie ze stałej."""
+    import hashlib
+    import logowanie
+    katalog = tmp_path / 'auth'
+    katalog.mkdir()
+    sol = bytes(range(16))
+    skrot = hashlib.scrypt(HASLO_F.encode(), salt=sol, n=2 ** 14, r=8, p=1, dklen=32,
+                           maxmem=128 * 1024 ** 2)
+    (katalog / logowanie.PLIK_HASLA).write_text(json.dumps(
+        {'algorytm': 'scrypt', 'n': 2 ** 14, 'r': 8, 'p': 1, 'dlugosc': 32,
+         'sol': sol.hex(), 'skrot': skrot.hex()}), encoding='utf-8')
+    assert logowanie.sprawdz_haslo(katalog, HASLO_F)
+    assert not logowanie.sprawdz_haslo(katalog, 'zle-haslo-0000')
