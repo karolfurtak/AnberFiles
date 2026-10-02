@@ -47,7 +47,7 @@ def test_bez_hasla_401_z_haslem_200(tmp_path, auth):
 
     async def sc(cl):
         r1 = await cl.get('/')
-        r2 = await cl.get('/', auth=aiohttp.BasicAuth('karol', 'zle'))
+        r2 = await cl.get('/', auth=aiohttp.BasicAuth('admin', 'zle'))
         r3 = await cl.get('/', auth=auth)
         return r1.status, r2.status, r3.status, await r3.text()
     s1, s2, s3, html = uruchom(k, sc)

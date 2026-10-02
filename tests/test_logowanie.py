@@ -103,7 +103,7 @@ def test_haslo_basic_nie_wpuszcza_w_trybie_formularz(tmp_path):
 
     async def sc(cl):
         return (await cl.get('/', headers=API,
-                             auth=aiohttp.BasicAuth('karol', HASLO_F))).status
+                             auth=aiohttp.BasicAuth('admin', HASLO_F))).status
     assert uruchom(k, sc) == 401
 
 

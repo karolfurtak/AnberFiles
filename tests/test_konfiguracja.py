@@ -50,7 +50,7 @@ def test_instancja_jarvis_z_przykladu(tmp_path):
     k = konfiguracja.wczytaj(env={'ANBERFILES_CONF': str(conf)})
     assert k.nazwa_instancji == 'Jarvis'
     assert k.port == 8790
-    assert k.uzytkownik_www == 'karol'
+    assert k.uzytkownik_www == 'admin'
     assert k.haslo_wymagane is True
     assert k.tylko_odczyt is True
     assert k.logowanie == 'formularz'
@@ -187,3 +187,21 @@ def test_ustawienia_instancji_z_srodowiska_ci():
     import konfiguracja
     k = konfiguracja.wczytaj()
     assert konfiguracja.sprawdz_przy_starcie(k) == []
+
+
+def test_przyklad_jarvis_bez_nazw_osobowych_i_ze_wszystkimi_kluczami():
+    """D4: przykład w publicznym repozytorium — login „admin", żadnych imion;
+    każdy klucz ustawień (także nowe: dozwolone_hosty, soffice_bez_sieci,
+    limit_druku_na_godzine, dziennik_dostepu) opisany w przykładzie."""
+    import configparser
+    import re
+    import konfiguracja
+    from conftest import PRZYKLAD_JARVIS
+    tekst = PRZYKLAD_JARVIS.read_text(encoding='utf-8')
+    assert re.search(r'(?m)^uzytkownik_www\s*=\s*admin\b', tekst)
+    assert 'karol' not in tekst.lower()
+    cp = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), interpolation=None)
+    cp.read_string(tekst)
+    for sekcja, klucze in konfiguracja.KLUCZE.items():
+        brak = [kl for kl in klucze if not cp.has_option(sekcja, kl)]
+        assert brak == [], f'[{sekcja}] brak w przykładzie: {brak}'

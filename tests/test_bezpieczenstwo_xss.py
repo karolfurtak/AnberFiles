@@ -182,7 +182,7 @@ def test_naglowki_403_i_formularz_jarvis(tmp_path):
     (korzen / 'a.txt').write_text('x', encoding='utf-8')
 
     async def sc(cl):
-        r = await cl.delete('/a.txt', auth=aiohttp.BasicAuth('karol', HASLO))
+        r = await cl.delete('/a.txt', auth=aiohttp.BasicAuth('admin', HASLO))
         return r.status, r.headers
     st, h = uruchom(k_basic, sc)
     assert st == 403

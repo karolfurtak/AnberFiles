@@ -13,7 +13,7 @@
 nazwa_instancji = Jarvis
 host            = 0.0.0.0        ; dostęp z sieci lokalnej odcina zapora systemu
 port            = 8790
-uzytkownik_www  = karol
+uzytkownik_www  = admin          ; login okna HTTP Basic (logowanie = basic); przy formularzu nieużywany
 haslo_wymagane  = tak            ; przy logowanie = basic: pusty SERVER_PASS = serwer nie startuje
 logowanie       = formularz      ; basic = okno HTTP Basic (konsola) · formularz = strona logowania + zapamiętane urządzenie
 tylko_odczyt    = tak            ; wgrywanie, usuwanie, zmiana nazwy, nowy katalog → 403

@@ -142,4 +142,4 @@ async def czekaj_na_lektora(cl, auth, plik: Path = None, limit: float = 30.0):
 @pytest.fixture
 def auth():
     import aiohttp
-    return aiohttp.BasicAuth('karol', HASLO)
+    return aiohttp.BasicAuth('admin', HASLO)
