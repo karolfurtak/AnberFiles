@@ -573,6 +573,31 @@ async def synth(chunks: list, out: Path, rate: str):
 
 
 LOCK_FILE = Path('/tmp/lektor.lock')
+# PID lektora, który trzyma rygiel — serwer plików sygnałuje (pauza, przerwanie)
+# wyłącznie ten proces, po sprawdzeniu /proc/<pid>/cmdline (audyt C10)
+PID_FILE = Path('/tmp/lektor.pid')
+
+
+def _zapisz_pid():
+    """Zapis PID-u po zdobyciu rygla (podmiana atomowa); błąd zapisu nie
+    zatrzymuje lektora — tylko pauza/przerwanie z serwera nie zadziała."""
+    import os
+    try:
+        tmp = PID_FILE.with_name(f'{PID_FILE.name}.{os.getpid()}.tmp')
+        tmp.write_text(f'{os.getpid()}\n', encoding='ascii')
+        os.replace(tmp, PID_FILE)
+    except OSError as e:
+        print(f'UWAGA: nie zapisano {PID_FILE}: {e}', file=sys.stderr, flush=True)
+
+
+def _usun_pid():
+    """Usunięcie pliku PID przy końcu — tylko własnego (nie cudzego)."""
+    import os
+    try:
+        if PID_FILE.read_text(encoding='ascii').strip() == str(os.getpid()):
+            PID_FILE.unlink()
+    except (OSError, ValueError):
+        pass
 
 
 def _rygiel():
@@ -861,6 +886,9 @@ def main():
         sys.exit(1)
 
     _lock_f = _rygiel()  # noqa: F841 — trzymany do końca procesu
+    _zapisz_pid()
+    import atexit
+    atexit.register(_usun_pid)
     raw = src.read_text(encoding='utf-8', errors='replace')
     # opisy ilustracji (model wizyjny) — PRZED normalizacją, żeby opis
     # przeszedł przez pełną normalizację liczb/jednostek jak zwykły tekst

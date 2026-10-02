@@ -3067,29 +3067,43 @@ async def _lektor_run(job: dict):
             _lektor_maybe_shutdown()
 
 
+# C10: lektor uruchomiony POZA serwerem (agent, CLI) zapisuje swój PID do
+# pliku obok rygla /tmp/lektor.lock (czytaj_tts.py: PID_FILE, po zdobyciu
+# rygla — w pliku jest zawsze lektor, który akurat czyta). Serwer sygnałuje
+# WYŁĄCZNIE ten PID i tylko, gdy /proc/<pid>/cmdline nadal zawiera
+# czytaj_tts.py (PID mógł zostać ponownie użyty przez inny program). Dawniej
+# pgrep -f trafiał w każdy proces z tą nazwą w linii poleceń.
+LEKTOR_PID_PLIK = Path('/tmp/lektor.pid')
+KATALOG_PROC = Path('/proc')
+# numery sygnałów Linuksa (moduł signal na Windows ich nie ma — testy)
+SYGNAL_KILL, SYGNAL_STOP, SYGNAL_CONT = 9, 19, 18
+
+
+def _wyslij_sygnal(pid: int, sig: int) -> None:
+    """Jedyne miejsce wysyłania sygnału do lektora zewnętrznego (testy podstawiają)."""
+    os.kill(pid, sig)
+
+
 def _ext_lektor_pids() -> set:
-    """PID-y czytaj_tts.py uruchomione POZA serwerem (agent z Discorda,
-    CLI) — pgrep minus nasze własne dzieci z kolejki."""
-    import subprocess
+    """PID lektora zewnętrznego z pliku PID — zbiór pusty albo jednoelementowy.
+    Warunki: liczba > 1, nie ten serwer, /proc/<pid>/cmdline zawiera
+    czytaj_tts.py, comm = interpreter Pythona, nie nasze dziecko z kolejki."""
     try:
-        r = subprocess.run(['pgrep', '-f', 'czytaj_tts.py'],
-                           capture_output=True, text=True)
-    except OSError:                      # brak pgrep (np. Windows) = brak obcych
+        pid = int(LEKTOR_PID_PLIK.read_text(encoding='ascii').strip())
+    except (OSError, ValueError, UnicodeDecodeError):
         return set()
-    pids = {int(x) for x in r.stdout.split()} if r.returncode == 0 else set()
-    # tylko realne interpretery Pythona — pgrep -f łapie też powłoki/wrappery,
-    # których CMDLINE zawiera nazwę skryptu (np. sesję ssh agenta!)
-    real = set()
-    for p in pids:
-        try:
-            comm = Path(f'/proc/{p}/comm').read_text().strip()
-        except OSError:
-            continue
-        if comm.startswith('python'):
-            real.add(p)
+    if pid <= 1 or pid == os.getpid():
+        return set()
+    try:
+        cmd = (KATALOG_PROC / str(pid) / 'cmdline').read_bytes()
+        comm = (KATALOG_PROC / str(pid) / 'comm').read_text().strip()
+    except OSError:
+        return set()
+    if b'czytaj_tts.py' not in cmd or not comm.startswith('python'):
+        return set()
     ours = {j['proc'].pid for j in _LEKTOR_QUEUE
             if j.get('proc') is not None and j['proc'].returncode is None}
-    return real - ours
+    return {pid} - ours
 
 
 def _ext_lektor_running() -> bool:
@@ -3102,7 +3116,7 @@ def _ext_lektor_src() -> str:
     także na wierszu pliku źródłowego. '' = brak."""
     for pid in _ext_lektor_pids():
         try:
-            parts = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\x00')
+            parts = (KATALOG_PROC / str(pid) / 'cmdline').read_bytes().split(b'\x00')
         except OSError:
             continue
         args = [p.decode('utf-8', 'replace') for p in parts if p]
@@ -3600,7 +3614,7 @@ async def lektor_pause(request):
         # zewnętrzny lektor (agent/CLI): tylko hold/zamrożenie
         for pid in _ext_lektor_pids():
             try:
-                os.kill(pid, _sig.SIGSTOP)
+                _wyslij_sygnal(pid, SYGNAL_STOP)
             except ProcessLookupError:
                 pass
         _LEKTOR_PAUSED = True
@@ -3652,7 +3666,7 @@ async def lektor_resume(request):
                 pass
     for pid in _ext_lektor_pids():
         try:
-            os.kill(pid, _sig.SIGCONT)
+            _wyslij_sygnal(pid, SYGNAL_CONT)
         except ProcessLookupError:
             pass
     return web.json_response({'resumed': True})
@@ -3664,12 +3678,10 @@ async def lektor_cancel(request):
     'ext' = przerwij lektora uruchomionego poza serwerem (agent/CLI)."""
     raw_id = request.query.get('lektorqdel', '')
     if raw_id == 'ext':
-        import signal
         killed = []
         for pid in _ext_lektor_pids():
             try:
-                import os
-                os.kill(pid, signal.SIGKILL)
+                _wyslij_sygnal(pid, SYGNAL_KILL)
                 killed.append(pid)
             except ProcessLookupError:
                 pass
