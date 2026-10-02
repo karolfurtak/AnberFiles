@@ -83,11 +83,13 @@ async def _zadania(cl, auth):
     return (await (await cl.get('/?lektorqj=1', auth=auth)).json())['jobs']
 
 
-async def _czekaj_na_zadanie(cl, auth, limit=10.0):
+async def _czekaj_na_zadanie(cl, auth, limit=10.0, czeka=None):
+    """Zadanie w kolejce; czeka='puls' — także ustalony powód czekania (zadanie
+    ustala go w swoim pierwszym kroku, chwilę po dopisaniu do kolejki)."""
     t = 0.0
     while t < limit:
         j = await _zadania(cl, auth)
-        if j:
+        if j and (czeka is None or all(x['czeka'] == czeka for x in j)):
             return j
         await asyncio.sleep(0.05)
         t += 0.05
@@ -119,7 +121,7 @@ def test_zmiana_tresci_daje_zadanie_i_nowe_nagranie(tmp_path, auth, puls):
     puls['bieg'] = True                          # zatrzymuje zadanie w kolejce
 
     async def sc(cl):
-        jobs = await _czekaj_na_zadanie(cl, auth)
+        jobs = await _czekaj_na_zadanie(cl, auth, czeka='puls')
         lista = await (await cl.get('/?przesluchania=1', auth=auth)).text()
         sluchaj = await (await cl.get('/vault/a/notatka.md?sluchaj=1', auth=auth)).text()
         stary_bajt = aud.read_bytes()            # stare nagranie nadal na miejscu
@@ -154,7 +156,7 @@ def test_lista_do_przesluchania_pokazuje_odswiezanie(tmp_path, auth, puls):
     puls['bieg'] = True
 
     async def sc(cl):
-        await _czekaj_na_zadanie(cl, auth)
+        await _czekaj_na_zadanie(cl, auth, czeka='puls')
         return await (await cl.get('/?przesluchania=1', auth=auth)).text()
     html = uruchom(k, sc)
     assert '🔄 odświeżane po zmianie dokumentu · ⏳ czeka na koniec biegu Pulsa' in html
