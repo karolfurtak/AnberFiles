@@ -41,7 +41,7 @@ KLUCZE = {
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
                'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci',
-               'limit_druku_na_godzine'),
+               'limit_druku_na_godzine', 'strona_startowa'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -95,6 +95,9 @@ class Konfiguracja:
     # unshare -n), tak = wymagane (bez piaskownicy brak konwersji), nie = nigdy
     soffice_bez_sieci: str = 'auto'
     limit_druku_na_godzine: int = 20     # zadań druku na godzinę (429 ponad), D5
+    # adres strony startowej serwera (link „🏠 <nazwa instancji>” w paskach widoków);
+    # pusty = brak linku (konsola Anbernic)
+    strona_startowa: str = ''
 
     @property
     def katalog_auth(self) -> Path:
@@ -187,6 +190,18 @@ def _hosty(tekst: str) -> tuple:
                                    'hosta (np. jarvis.example.org albo .ts.net)')
         wynik.append(s.rstrip('.'))
     return tuple(wynik)
+
+
+def _adres_http(klucz: str, tekst: str) -> str:
+    """Adres strony: pusty albo http(s)://host… — inny schemat (javascript:,
+    data:) w linku strony byłby wykonaniem cudzego kodu, więc to błąd ustawień."""
+    t = tekst.strip()
+    if not t:
+        return ''
+    if not re.fullmatch(r'https?://[^\s<>"\'`\\]+', t, flags=re.IGNORECASE):
+        raise BladKonfiguracji(f'[serwer] {klucz} = {tekst!r}: dozwolony adres '
+                               'zaczynający się od http:// lub https:// (albo pusty)')
+    return t
 
 
 def _czytaj_plik(sciezka: Path) -> dict:
@@ -284,6 +299,7 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
                                         s.get('soffice_bez_sieci', 'auto')),
         limit_druku_na_godzine=_dodatnia('limit_druku_na_godzine',
                                          s.get('limit_druku_na_godzine', '20')),
+        strona_startowa=_adres_http('strona_startowa', s.get('strona_startowa', '')),
     )
 
 
