@@ -78,11 +78,18 @@ hasło): ok. 8 min; z tymi krokami zwykle poniżej 30 min.
     `sudo -u anberfiles git clone git@github-wykonawca:karolfurtak/jarwis-wykonawca.git /srv/anberfiles/wykonawca`
 11. **Lektor — program syntezy** (1 min):
     `sudo -u anberfiles cp /srv/anberfiles/kod/tools/czytaj_tts.py /srv/anberfiles/eksport/`
-12. **Polecenia** (1 min; dowiązania, by skrypty znalazły kod). Odświeżanie klonów
+12. **Polecenia** (1 min; kopie należące do roota). Odświeżanie klonów
     woła jednostka systemd, więc leży w `/usr/local/bin`; polecenia administracyjne
-    (reset hasła, kopia plików) w `/usr/local/sbin`:
-    `sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-odswiez /usr/local/bin/`
-    `sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /srv/anberfiles/kod/narzedzia/anberfiles-kopia-plikow /usr/local/sbin/`
+    (reset hasła, kopia plików) w `/usr/local/sbin`. Root wykonuje te skrypty
+    (sudo, cotygodniowa kopia), więc nie mogą być dowiązaniami do katalogu
+    użytkownika usługi, a kod i środowisko muszą należeć do roota:
+    `sudo install -o root -g root -m 0755 /srv/anberfiles/kod/narzedzia/anberfiles-odswiez /usr/local/bin/`
+    `sudo install -o root -g root -m 0755 /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /srv/anberfiles/kod/narzedzia/anberfiles-kopia-plikow /usr/local/sbin/`
+    `sudo chown -R root:root /srv/anberfiles/kod /srv/anberfiles/venv && sudo chown root:root /srv/anberfiles`
+    Oba skrypty roota mają samokontrolę: odmawiają (kod 1), gdy ich plik, katalog
+    `app/`, środowisko albo katalog nadrzędny należy do nie-roota lub ma zapis
+    grupy/innych. Po każdej aktualizacji kodu (`git pull` jako `anberfiles`)
+    powtórz `chown -R root:root` i `install` — inaczej reset hasła odmówi.
     Reset hasła sam przełącza się na `/srv/anberfiles/venv/bin/python`, bo
     systemowy Python nie ma biblioteki `aiohttp` (inna ścieżka środowiska: zmienna
     `ANBERFILES_VENV`).

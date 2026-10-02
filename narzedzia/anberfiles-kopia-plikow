@@ -18,6 +18,11 @@
 #
 # ANBERFILES_KOPIA_ZRODLO — korzeń źródeł (domyślnie /; testy podają katalog testowy).
 # Brak pliku źródłowego = wpis „brak" w raporcie, nie błąd.
+# Instalacja: KOPIA należąca do roota (root uruchamia ten skrypt co tydzień):
+#   sudo install -o root -g root -m 0755 /srv/anberfiles/kod/narzedzia/anberfiles-kopia-plikow /usr/local/sbin/
+# Samokontrola: jako root skrypt odmawia (kod 1), gdy jego plik albo którykolwiek
+# katalog nadrzędny należy do kogoś innego niż root albo ma prawo zapisu dla
+# grupy lub innych — inaczej użytkownik usługi mógłby podmienić kod roota.
 # Kod wyjścia: 0 = sukces, 1 = błąd (komunikat na stderr).
 set -u
 
@@ -26,6 +31,37 @@ ZR="${ZR%/}"
 PAKIETY="mpg123 flac cups cups-client cups-filters avahi-utils libreoffice-writer-nogui fonts-liberation2 fonts-dejavu-core"
 
 blad() { printf 'anberfiles-kopia-plikow: BŁĄD — %s\n' "$*" >&2; exit 1; }
+
+# >>> zaufanie (wycinane przez test: tests/test_samokontrola_roota.py)
+# plik_zaufany <plik> <wymagany-uid>: 0 = plik, jego cel i wszystkie katalogi
+# nadrzędne należą do <wymagany-uid> i nie mają zapisu grupy/innych;
+# 1 = odmowa z komunikatem na stderr.
+plik_zaufany() {
+    pz="$(readlink -f "$1")" || { printf 'nie da się ustalić ścieżki %s\n' "$1" >&2; return 1; }
+    while :; do
+        pz_uid="$(stat -c '%u' "$pz")" || return 1
+        if [ "$pz_uid" != "$2" ]; then
+            printf 'plik %s należy do %s — root nie wykona kodu, który może podmienić nieuprzywilejowany użytkownik\n' \
+                "$pz" "$(stat -c '%U' "$pz")" >&2
+            return 1
+        fi
+        pz_tryb="$(stat -c '%a' "$pz")"
+        pz_inni="${pz_tryb#"${pz_tryb%??}"}"
+        case "$pz_inni" in
+            *[2367]*)
+                printf 'plik %s ma prawo zapisu dla grupy lub innych (tryb %s) — root nie wykona kodu, który może podmienić nieuprzywilejowany użytkownik\n' \
+                    "$pz" "$pz_tryb" >&2
+                return 1;;
+        esac
+        [ "$pz" = / ] && return 0
+        pz="$(dirname "$pz")"
+    done
+}
+# <<< zaufanie
+
+if [ "$(id -u)" = 0 ]; then
+    plik_zaufany "$0" 0 || blad "samokontrola: kod roota może być podmieniony"
+fi
 
 [ $# -eq 1 ] || blad "podaj jeden argument: katalog docelowy kopii"
 CEL="$1"

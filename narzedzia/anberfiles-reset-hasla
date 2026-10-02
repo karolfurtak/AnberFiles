@@ -19,13 +19,21 @@ przełącza się (os.execv) na $ANBERFILES_VENV/bin/python (domyślnie
 /srv/anberfiles/venv/bin/python); zmienna ANBERFILES_RESET_PRZELACZONY
 blokuje pętlę, gdyby i tam modułu brakowało.
 
-Instalacja (dowiązanie w katalogu poleceń administracyjnych, żeby skrypt
-znalazł katalog app/ repozytorium):
-    sudo ln -sf /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /usr/local/sbin/
+Instalacja (KOPIA należąca do roota, nie dowiązanie do katalogu użytkownika
+usługi — root uruchamia ten kod, więc nieuprzywilejowany użytkownik nie może
+mieć możliwości jego podmiany):
+    sudo install -o root -g root -m 0755 /srv/anberfiles/kod/narzedzia/anberfiles-reset-hasla /usr/local/sbin/
+    sudo chown -R root:root /srv/anberfiles/kod /srv/anberfiles/venv
+    sudo chown root:root /srv/anberfiles
+Samokontrola: gdy skrypt działa jako root, odmawia (kod 1), jeśli jego plik,
+katalog app/, interpreter środowiska albo którykolwiek katalog nadrzędny
+(aż do /) należy do kogoś innego niż root albo ma prawo zapisu dla grupy
+lub innych. Kontroli nie da się wyłączyć zmienną środowiskową.
 Kod wyjścia: 0 = sukces, 1 = błąd (komunikat na stderr).
 """
 import argparse
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -91,6 +99,82 @@ def sprawdz_uprawnienia(katalog: Path, euid=None):
             'sudo anberfiles-reset-hasla')
 
 
+def _lancuch(sciezka: str):
+    """Ścieżka i wszystkie jej katalogi nadrzędne aż do /."""
+    p = sciezka
+    while True:
+        yield p
+        nadrzedny = os.path.dirname(p)
+        if nadrzedny == p:
+            return
+        p = nadrzedny
+
+
+def _nazwa_uid(uid: int) -> str:
+    try:
+        import pwd
+        return f'{pwd.getpwuid(uid).pw_name} (uid {uid})'
+    except (ImportError, KeyError):
+        return f'uid {uid}'
+
+
+def sprawdz_zaufanie_roota(sciezki, euid=None, lstat_fn=os.lstat,
+                           realpath_fn=os.path.realpath):
+    """None = wolno; tekst = powód odmowy. Dla roota (euid 0): każda ścieżka,
+    jej cel (realpath) i wszystkie katalogi nadrzędne muszą należeć do roota
+    i nie mieć prawa zapisu dla grupy ani innych — inaczej nieuprzywilejowany
+    użytkownik mógłby podmienić kod, który root zaraz wykona. Dowiązanie
+    symboliczne: sprawdzany jest jego właściciel (tryb dowiązania nic nie
+    znaczy), a cel osobno przez realpath. Dla nie-roota nic nie sprawdza."""
+    if os.name != 'posix':
+        return None
+    euid = os.geteuid() if euid is None else euid
+    if euid != 0:
+        return None
+    widziane = set()
+    for sc in sciezki:
+        sc = os.path.abspath(str(sc))
+        for baza in (sc, realpath_fn(sc)):
+            for p in _lancuch(baza):
+                if p in widziane:
+                    continue
+                widziane.add(p)
+                try:
+                    st = lstat_fn(p)
+                except OSError as e:
+                    return (f'plik {p}: {e} — root nie wykona kodu, '
+                            'którego nie da się sprawdzić')
+                if st.st_uid != 0:
+                    return (f'plik {p} należy do {_nazwa_uid(st.st_uid)} — root nie '
+                            'wykona kodu, który może podmienić nieuprzywilejowany '
+                            'użytkownik')
+                if not stat.S_ISLNK(st.st_mode) and st.st_mode & 0o022:
+                    return (f'plik {p} ma prawo zapisu dla grupy lub innych '
+                            f'(tryb {stat.S_IMODE(st.st_mode):04o}) — root nie '
+                            'wykona kodu, który może podmienić nieuprzywilejowany '
+                            'użytkownik')
+    return None
+
+
+def kod_do_sprawdzenia():
+    """Wszystko, co root wykona w tym poleceniu: ten plik, moduły z app/
+    (z pamięcią podręczną bajtkodu) i środowisko usługi, do którego
+    skrypt się przełącza."""
+    app = _katalog_app()
+    pliki = [__file__, app, *sorted(app.glob('*.py'))]
+    if (app / '__pycache__').is_dir():
+        pliki.append(app / '__pycache__')
+    venv = katalog_srodowiska()
+    if venv.is_dir():
+        pliki += [venv, venv / 'bin']
+        py = interpreter_srodowiska()
+        if py is not None:
+            pliki.append(py)
+        pliki += sorted(venv.glob('lib/python*/site-packages'))
+    pliki.append(sys.prefix)
+    return pliki
+
+
 def _blad(tekst: str) -> int:
     print(f'anberfiles-reset-hasla: BŁĄD — {tekst}', file=sys.stderr, flush=True)
     return 1
@@ -105,6 +189,9 @@ def glowna(argv=None) -> int:
                     help='plik ustawień instancji (domyślnie ANBERFILES_CONF '
                          'albo /etc/anberfiles/jarvis.conf)')
     a = ap.parse_args(argv)
+    odmowa_roota = sprawdz_zaufanie_roota(kod_do_sprawdzenia())
+    if odmowa_roota:
+        return _blad(odmowa_roota)
     try:
         import konfiguracja
         import logowanie
