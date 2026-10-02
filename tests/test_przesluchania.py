@@ -578,3 +578,47 @@ def test_czas_trwania_mp3_mpeg2_mono_z_info_jak_z_pipera(tmp_path):
     (tmp_path / 'p.mp3').write_bytes(b'ID3\x04\x00\x00\x00\x00\x00\x00' + ramka)
     assert abs(nagrania.czas_trwania_s(tmp_path / 'p.mp3') - 1408.209) < 0.01
     assert nagrania.opis_czasu(1408.2) == '23 min 28 s'
+
+
+# ── nazwa pliku jak w Obsidianie i data powstania (Karol 02.10 19:18: „Nazwy
+# plików są inne, niż ja je widzę”; plik 2026-09-28-… miał na liście 29.09) ──
+
+def test_lista_i_widok_sluchania_nazwa_pliku_i_data_powstania_z_gita(tmp_path, auth):
+    import time
+    k, v = _konf(tmp_path)
+    plik = v / 'Zasoby' / 'MoCap' / '2026-09-28-plan-wtyczka-fab.md'
+    plik.write_text('---\nstatus: do-akceptacji\n---\n# Plan produktu — wtyczka UE\n',
+                    encoding='utf-8')
+    (v / '.git').mkdir()
+    powstanie = time.mktime((2026, 9, 29, 12, 0, 0, 0, 0, -1))
+    (v / '.git' / 'anberfiles-czasy.json').write_text(json.dumps({
+        'wersja': 1, 'pliki': {'Zasoby/MoCap/2026-09-28-plan-wtyczka-fab.md':
+                               [powstanie + 3600, powstanie]}, 'katalogi': {}}),
+        encoding='utf-8')
+
+    async def sc(cl):
+        lista = await _lista(cl, auth)
+        sl = await (await cl.get('/vault/Zasoby/MoCap/2026-09-28-plan-wtyczka-fab.md?sluchaj=1',
+                                 auth=auth)).text()
+        return lista, sl
+    lista, sl = uruchom(k, sc)
+    i = lista.index('2026-09-28-plan-wtyczka-fab.md?sluchaj=1')
+    wiersz = lista[i:lista.index('</a>', i)]
+    assert '<div class="tt">2026-09-28-plan-wtyczka-fab</div>' in wiersz
+    assert 'Plan produktu — wtyczka UE · Zasoby/MoCap' in wiersz
+    assert 'w nazwie 28.09 · powstanie 29.09.2026' in wiersz
+    assert ('<div class="nazwa"><b>2026-09-28-plan-wtyczka-fab</b> · '
+            'w nazwie 28.09 · powstanie 29.09.2026</div>') in sl
+
+
+def test_data_zgodna_z_nazwa_jedna_data(tmp_path):
+    """Przedrostek daty zgodny z powstaniem (albo brak przedrostka) → jedna data."""
+    import server
+    from datetime import date
+    dzis = tmp_path / f'{date.today():%Y-%m-%d}-notatka.md'
+    dzis.write_text('x', encoding='utf-8')
+    bez = tmp_path / 'notatka.md'
+    bez.write_text('x', encoding='utf-8')
+    for plik in (dzis, bez):
+        opis = server.opis_daty_notatki(plik)
+        assert opis.startswith(f'powstanie {date.today():%d.%m.%Y}') and 'w nazwie' not in opis

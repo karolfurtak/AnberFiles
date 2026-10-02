@@ -2584,6 +2584,48 @@ def _czasy_wpisu(item: Path, st, bufor, rel: str, katalog: bool):
     return st.st_mtime, st.st_mtime, False
 
 
+def _powstanie_pliku(plik: Path):
+    """(czas powstania, pewny?) — ta sama definicja co kolumna „Powstanie”
+    listy katalogów: bufor gita klonu, inaczej system plików."""
+    plik = Path(plik)
+    korzen = _korzen_gita(plik.parent)
+    buf = _bufor_czasow(korzen)
+    if buf is not None:
+        try:
+            w = buf['pliki'].get(plik.relative_to(korzen).as_posix())
+        except ValueError:
+            w = None
+        if w:
+            return float(w[1]), True
+    st = plik.stat()
+    _, bt, pewne = _czasy_wpisu(plik, st, None, '', False)
+    return bt, pewne
+
+
+def opis_daty_notatki(plik: Path) -> str:
+    """„powstanie 28.09.2026”, a gdy nazwa ma przedrostek daty inny niż
+    powstanie — obie: „w nazwie 28.09 · powstanie 29.09.2026” (02.10 Karol:
+    plik 2026-09-28-… miał na liście 29.09)."""
+    import re as _re
+    from datetime import date
+    try:
+        ts, pewne = _powstanie_pliku(plik)
+    except OSError:
+        return ''
+    d = datetime.fromtimestamp(ts)
+    pow_ = f'powstanie {d:%d.%m.%Y}' + ('' if pewne else ' (≈ czas modyfikacji)')
+    m = _re.match(r'(\d{4})-(\d{2})-(\d{2})', Path(plik).name)
+    if m:
+        try:
+            dn = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            dn = None
+        if dn is not None and dn != d.date():
+            wn = f'{dn:%d.%m}' if dn.year == d.year else f'{dn:%d.%m.%Y}'
+            return f'w nazwie {wn} · {pow_}'
+    return pow_
+
+
 def _komorka_powstania(bt: float, pewne: bool) -> str:
     if pewne:
         return f'<td data-sort="{bt:.0f}">{_fmt_time(bt)}</td>'
@@ -4867,6 +4909,9 @@ PRZ_STYLE = (
     '.sw.zlecone,.sw.wdrozone{background:#1d4a2e;color:#9fe0b0}'
     '.sw.nie-dotyczy{background:#2b3240;color:#9aa0ab}.sw.nieznany{background:#3a2f4a;color:#d7c4ff}'
     '.dw{color:#b8bec8;font-size:.82em;margin-top:.35em;line-height:1.4}'
+    '.sub{color:#9aa0ab;font-size:.82em;margin-top:.15em;line-height:1.35}'
+    '.nazwa{padding:.35em .9em;font-size:.85em;color:#cfd6df;background:#181b21}'
+    '.nazwa b{color:#fff;word-break:break-all}'
     '.dw.dd{color:#8a93a0;font-size:.76em}'
     '.tt{font-size:1.02em;line-height:1.35}'
     '.mt{color:#9aa0ab;font-size:.8em;margin-top:.3em;display:flex;gap:.6em;flex-wrap:wrap}'
@@ -4936,7 +4981,7 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
                              f'{_esc(_prz.NAZWY_STANOW.get(w["stan"], w["stan"]))}</b>')
         if w['rodzaj']:
             znaczniki.append(_esc(w['rodzaj']))
-        znaczniki.append(datetime.fromtimestamp(w['mtime']).strftime('%d.%m.%Y'))
+        znaczniki.append(_esc(opis_daty_notatki(w['plik'])))
         if w['odsluch'].get('odsluchane'):
             znaczniki.append('🎧 odsłuchane')
         if w['nieprzeniesiona']:
@@ -4962,7 +5007,10 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
             opis += f'<div class="dw dd">{_esc(w["dowod"])}</div>'
         czesci.append(
             f'<div class="row"><a class="lnk" href="{w["url"]}?sluchaj=1">'
-            f'<div class="tt">{_esc(w["tytul"])}'
+            # 02.10 Karol: „Nazwy plików są inne, niż ja je widzę” — główna linia
+            # = nazwa pliku jak w Obsidianie, pod nią tytuł z H1 i katalog
+            f'<div class="tt">{_esc(Path(w["plik"]).stem)}</div>'
+            f'<div class="sub">{_esc(w["tytul"])} · {_esc(Path(w["sciezka"]).parent.as_posix())}'
             f'</div><div class="mt">{"".join(f"<span>{z}</span>" for z in znaczniki)}'
             f'</div>{opis}</a>{lek}</div>')
     tresc = ''.join(czesci) or (
@@ -5096,6 +5144,7 @@ def render_sluchaj_page(target: Path, wiersz: dict) -> str:
         '<a href="#dec" title="Przewiń do decyzji">⬇ decyzja</a>'
         + _lektor_przycisk(target, aud) +
         f'<span style="color:#6fce8f;font-size:.85em">{opis}</span></div>'
+        f'<div class="nazwa"><b>{_esc(target.stem)}</b> · {_esc(opis_daty_notatki(target))}</div>'
         f'{audio_html}</div>'
         f'<div id="txt">{body}</div>'
         '<div class="dec" id="dec">'
