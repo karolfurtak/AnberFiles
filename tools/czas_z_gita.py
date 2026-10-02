@@ -5,10 +5,13 @@ Użycie: czas_z_gita.py <katalog klonu> [--bufor <plik.json>]
 
 Git nadaje plikom czas modyfikacji (mtime) = chwila pobrania, więc w listingu
 wszystkie pliki mają tę samą datę. Skrypt dla każdego śledzonego pliku ustala:
-  - zmianę treści — czas OSTATNIEGO commita, który zmienił TREŚĆ pliku;
-    czysta zmiana nazwy albo położenia (git mv, rename R100) się nie liczy
-    (02.10.2026: po przeniesieniu całego vaulta 01.10 wieczorem wszystkie
-    pliki miały datę przeniesienia),
+  - zmianę treści — czas OSTATNIEGO commita, który zmienił plik bez zmiany
+    nazwy/położenia (git: M, T, A). Zmiana nazwy albo położenia (R, także
+    z podobieństwem < 100 %) się nie liczy: porządek vaulta 01.10.2026
+    przeniósł pliki git mv i przy okazji poprawił w nich odwołania (R095–R099),
+    a to nie jest praca nad treścią (02.10: „Wciąż wszędzie są te same daty”).
+    Kryterium = `git log --follow -M --diff-filter=M -1`, a gdy pusto —
+    dodanie pliku,
   - powstanie — czas NAJSTARSZEGO commita, który dodał plik, z pójściem
     wstecz przez zmiany nazwy i położenia.
 mtime i atime pliku = zmiana treści; katalog: mtime = najnowsza zmiana treści
@@ -62,8 +65,9 @@ def czasy_z_historii(katalog, pliki):
 
     Idzie od najnowszego commita; `nazwa` mapuje ścieżkę w danym punkcie
     historii na plik bieżący (zmiana nazwy R przesuwa mapowanie na starą
-    nazwę). Zmiana treści: pierwsze (najnowsze) M/T/A albo R z podobieństwem
-    < 100 %. Powstanie: ostatnie (najstarsze) A w łańcuchu nazw."""
+    nazwę). Zmiana treści: pierwsze (najnowsze) M/T, a gdy brak — A
+    (najstarsze dodanie); R nigdy. Powstanie: najstarsze A w łańcuchu nazw
+    (także na równoległych gałęziach przed scaleniem)."""
     nazwa = {p: p for p in pliki}
     zmiana, powstanie = {}, {}
     if not nazwa:
@@ -94,13 +98,12 @@ def czasy_z_historii(katalog, pliki):
                 stara, nowa = sciezki
                 f = nazwa.pop(nowa, None)
                 if f is not None:
-                    if status != "R100":
-                        zmiana.setdefault(f, czas)
                     nazwa[stara] = f
             elif rodzaj in "AC":
-                f = nazwa.pop(sciezki[-1], None)
+                # bez usuwania z mapy: ten sam plik bywa dodany na dwóch gałęziach
+                # (scalenie) — liczy się najstarsze dodanie, jak w git log --follow
+                f = nazwa.get(sciezki[-1])
                 if f is not None:
-                    zmiana.setdefault(f, czas)
                     powstanie[f] = czas
             elif rodzaj in "MT":
                 f = nazwa.get(sciezki[0])
@@ -118,7 +121,8 @@ def czasy_z_historii(katalog, pliki):
     if proc.returncode != 0:
         raise RuntimeError("git log: " + (err or "kod %s" % proc.returncode))
     wynik = {}
-    for f, z in zmiana.items():
+    for f in set(zmiana) | set(powstanie):
+        z = zmiana.get(f, powstanie.get(f))   # nigdy nie zmieniany → dodanie
         wynik[f] = (z, powstanie.get(f, z))   # płytki klon: brak A → najstarsza znana
     return wynik
 

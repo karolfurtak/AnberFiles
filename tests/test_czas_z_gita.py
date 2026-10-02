@@ -99,7 +99,6 @@ D_PRZENIESIENIE = "2024-01-05T12:00:00+0000"
 D_ZMIANA_NAZWY_Z_TRESCIA = "2024-01-07T12:00:00+0000"
 T_DODANIE = calendar.timegm((2024, 1, 1, 12, 0, 0))
 T_ZMIANA = calendar.timegm((2024, 1, 3, 12, 0, 0))
-T_ZMIANA_NAZWY_Z_TRESCIA = calendar.timegm((2024, 1, 7, 12, 0, 0))
 
 TRESC = "".join(f"wiersz {i} z dłuższą treścią notatki\n" for i in range(40))
 
@@ -140,13 +139,14 @@ def test_przeniesienie_nie_jest_zmiana_tresci(repo_przeniesienia, tmp_path):
     assert int(os.stat(r / "Projekt" / "Zasoby" / "notatka.md").st_mtime) == T_ZMIANA
     # nigdy nie zmieniana treść → data dodania, mimo przeniesienia
     assert int(os.stat(r / "Projekt" / "Zasoby" / "nietknieta.md").st_mtime) == T_DODANIE
-    # zmiana nazwy RAZEM ze zmianą treści → to jest zmiana treści
-    assert int(os.stat(r / "Projekt" / "nowa-nazwa.md").st_mtime) == T_ZMIANA_NAZWY_Z_TRESCIA
+    # przeniesienie z poprawką odwołań w tym samym commicie (R<100, jak porządek
+    # vaulta 01.10: R095–R099) to nadal przeniesienie, nie praca nad treścią
+    assert int(os.stat(r / "Projekt" / "nowa-nazwa.md").st_mtime) == T_DODANIE
     import json
     b = json.loads(bufor.read_text(encoding="utf-8"))
     assert b["pliki"]["Projekt/Zasoby/notatka.md"] == [T_ZMIANA, T_DODANIE]
     assert b["pliki"]["Projekt/Zasoby/nietknieta.md"] == [T_DODANIE, T_DODANIE]
-    assert b["pliki"]["Projekt/nowa-nazwa.md"] == [T_ZMIANA_NAZWY_Z_TRESCIA, T_DODANIE]
+    assert b["pliki"]["Projekt/nowa-nazwa.md"] == [T_DODANIE, T_DODANIE]
     assert b["katalogi"]["Projekt/Zasoby"] == [T_ZMIANA, T_DODANIE]
     assert len(b["head"]) == 40
 
@@ -187,3 +187,25 @@ def test_komorka_powstania_bez_daty_z_systemu_plikow_ma_adnotacje():
     import server
     assert "≈" in server._komorka_powstania(1.0e9, False)
     assert "≈" not in server._komorka_powstania(1.0e9, True)
+
+
+def test_plik_dodany_na_dwoch_galeziach_powstanie_najstarsze(tmp_path):
+    """Vault 03.09: ten sam plik dodany w schowku (27.08) i w migawce Jarvisa
+    (03.09), potem scalenie — powstanie i data = najstarsze dodanie."""
+    r = tmp_path / "v"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    (r / "baza.txt").write_text("b")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "baza", data=DATA1)
+    _git(r, "checkout", "-q", "-b", "boczna")
+    (r / "spis.md").write_text("spis\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "starsze dodanie", data="2024-02-01T12:00:00+0000")
+    _git(r, "checkout", "-q", "main")
+    (r / "spis.md").write_text("spis\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "nowsze dodanie", data="2024-03-01T12:00:00+0000")
+    _git(r, "merge", "-q", "--no-edit", "boczna", data="2024-03-02T12:00:00+0000")
+    assert _uruchom(r).returncode == 0
+    assert int(os.stat(r / "spis.md").st_mtime) == calendar.timegm((2024, 2, 1, 12, 0, 0))
