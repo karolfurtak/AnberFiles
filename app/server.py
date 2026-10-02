@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 import asyncio
+import collections
 import hashlib
 import hmac
 import logging
@@ -1468,7 +1469,8 @@ def render_md_page(target: Path) -> str:
         'drukarka musi być w sieci domowej)"))return;'
         'a.textContent="⏳...";'
         'try{const r=await afFetch(a.dataset.n+"?print=1",{method:"POST"});'
-        'a.textContent=r.status===202?"🖨 wysłano":"🖨 błąd";}'
+        'if(r.status===202)a.textContent="🖨 wysłano";'
+        'else{a.textContent="🖨 błąd";alert("Druk: "+await r.text());}}'
         'catch(err){a.textContent="🖨 błąd";}'
         'setTimeout(()=>a.textContent="🖨 drukuj",4000);};'
         # eksport DOCX z paskiem postępu (jak lektor): fetch blob + poll ?docxprog
@@ -3575,9 +3577,29 @@ async def print_item(request):
     ext = target.suffix.lower()
     if ext not in ('.md', '.docx', '.pdf'):
         return web.Response(status=400, text='Druk: .md/.docx/.pdf')
+    if ext == '.md' and not KONF.skrypt_eksportu_docx.is_file():
+        return web.Response(status=400, text='Druk .md niemożliwy: brak '
+                            f'export_to_docx.py w katalogu eksportu ({EXPORT_DIR}). '
+                            'Druk .docx i .pdf działa.')
+    # D5: limit zadań druku na godzinę (okno przesuwne) — 429 z Retry-After
+    import time as _t
+    teraz = _t.monotonic()
+    while _DRUK_CZASY and teraz - _DRUK_CZASY[0] >= 3600:
+        _DRUK_CZASY.popleft()
+    if len(_DRUK_CZASY) >= KONF.limit_druku_na_godzine:
+        za_ile = int(3600 - (teraz - _DRUK_CZASY[0])) + 1
+        _evlog('druk', f'limit {KONF.limit_druku_na_godzine} zadań na godzinę — '
+               f'odmowa druku {target.name}', level='warn')
+        return web.Response(status=429, headers={'Retry-After': str(za_ile)},
+                            text=f'Limit druku: {KONF.limit_druku_na_godzine} zadań '
+                                 f'na godzinę. Następne za {za_ile // 60 + 1} min.')
+    _DRUK_CZASY.append(teraz)
 
     asyncio.ensure_future(_drukuj(target))
     return web.json_response({'status': 'wysłano do druku'}, status=202)
+
+
+_DRUK_CZASY = collections.deque()        # chwile przyjęcia zadań druku (D5)
 
 
 async def _polecenie(*cmd, log=None) -> int:
@@ -4468,6 +4490,7 @@ def utworz_aplikacje(k):
     # stan kolejki lektora od zera (pętla zdarzeń nowa przy każdym starcie)
     _LEKTOR_QUEUE.clear()
     _LEKTOR_BLEDY.clear()
+    _DRUK_CZASY.clear()
     _LEKTOR_LOCK = None
     _LEKTOR_PAUSED = False
     _LEKTOR_SHUTDOWN = False

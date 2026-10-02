@@ -40,7 +40,8 @@ KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
                'haslo_wymagane', 'tylko_odczyt', 'logowanie',
                'limit_wgrywania_mb', 'prog_pamieci_mb', 'ustaw_haslo_bez_tokenu',
-               'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci'),
+               'limit_zip_mb', 'dozwolone_hosty', 'soffice_bez_sieci',
+               'limit_druku_na_godzine'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
@@ -93,6 +94,7 @@ class Konfiguracja:
     # LibreOffice w piaskownicy bez sieci (C9): auto = gdy się da (bwrap,
     # unshare -n), tak = wymagane (bez piaskownicy brak konwersji), nie = nigdy
     soffice_bez_sieci: str = 'auto'
+    limit_druku_na_godzine: int = 20     # zadań druku na godzinę (429 ponad), D5
 
     @property
     def katalog_auth(self) -> Path:
@@ -280,6 +282,8 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
         dozwolone_hosty=_hosty(s.get('dozwolone_hosty', '')),
         soffice_bez_sieci=_tak_nie_auto('soffice_bez_sieci',
                                         s.get('soffice_bez_sieci', 'auto')),
+        limit_druku_na_godzine=_dodatnia('limit_druku_na_godzine',
+                                         s.get('limit_druku_na_godzine', '20')),
     )
 
 

@@ -151,6 +151,10 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   - formularze logowania i „Ustaw hasło" (zwykły formularz HTML, działa bez JS
     i z menedżerem haseł) zamiast nagłówka sprawdzają `Origin`: obecny musi wskazywać
     ten sam host:port co `Host`, inaczej 403.
+- Druk (moduł `druk`): `limit_druku_na_godzine` (`[serwer]`, domyślnie 20) — zadań na
+  godzinę w oknie przesuwnym, ponad → 429 z `Retry-After`; druk `.md` bez
+  `export_to_docx.py` w katalogu eksportu → 400 z przyczyną (zamiast cichej awarii
+  w `print_errors.log`).
 - Dziennik dostępu: `katalog_danych/access.log` (klucz `[katalogi] dziennik_dostepu`;
   na konsoli `/mnt/data/access.log`) — linia na żądanie: czas, adres, metoda, ścieżka
   z zapytaniem, kod, bajty treści, czas obsługi; rotacja 5 × 5 MB (`access.log.1`…`.5`).
