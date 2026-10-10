@@ -64,3 +64,24 @@ znacznikiem „treść zmieniona po decyzji” — dlatego agent nanosi dokładn
 adres `--adres` / `ANBERFILES_ADRES` (domyślnie `http://100.67.174.47:8790`), limit czasu
 `--limit-s` (20 s) na każde żądanie. Kody wyjścia: 0 pobrane, 2 zły argument, 3 logowanie
 (także 429 — za dużo prób), 4 sieć / limit czasu, 5 niezgodny schemat, 6 potwierdzenie odrzucone.
+
+## Wdrożenie na Jarvisie
+
+`docs/odtworzenie-po-awarii.md` każe robić `git pull` jako `anberfiles`, ale `/srv/anberfiles/kod` należy do
+roota i stoi na odłączonym HEAD (stan 10.10.2026: `a567a59`, reflog `checkout: moving from main to a567a59`).
+Wdrożenie zgodne z praktyką (wymaga `sudo`): zapisz SHA sprzed wdrożenia, potem jako root
+`git -C /srv/anberfiles/kod fetch` i `git -C /srv/anberfiles/kod checkout --detach <SHA>`, `chown -R root:root`,
+`systemctl restart anberfiles`. Przed restartem bramka: kolejka lektora (`kolejka_lektora` z
+`/etc/anberfiles/jarvis.conf`) pusta i Puls (`http://127.0.0.1:7777/api/status`) bez biegu innego niż własny.
+Cofnięcie: `checkout --detach <SHA sprzed wdrożenia>` i restart — plik stanu zachowuje `wybory` (test
+`test_cofniecie_kodu_do_v1_zachowuje_wybory`).
+
+## Odbiór 98c (10.10.2026)
+
+Na instancji testowej (kopia klonu vaulta w `/tmp`, tylko do odczytu, port 8798 na 127.0.0.1, własny katalog
+danych, decyzja kliknięta wyłącznie na pozycji testowej dopisanej do kopii `NOW.md`): lista, wybór,
+powtórzenie bez nowego rekordu, eksport, `pobierz_decyzje.py`, restart z zachowaniem stanu, nagranie atrapą
+lektora. Zrzuty Chromium bez okna (pakiety `chromium` rozpakowane bez roota, `--headless=new --screenshot`):
+`docs/odbior/2026-10-10-98-lista.png` (sklejone: raporty, każde źródło osobnym filtrem, „Rozstrzygnięte”) i
+`docs/odbior/2026-10-10-98-lista-telefon.png` (szerokość 390 px). Puste kwadraty w miejscu emoji: Chromium bez
+okna na Jarvisie nie ma kroju emoji.
