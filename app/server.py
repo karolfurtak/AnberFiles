@@ -30,6 +30,7 @@ from aiohttp import web
 import konfiguracja as _konf
 import nagrania as _nagr
 import przesluchania as _prz
+import pozycje as _poz
 import odswiezanie as _odsw
 
 try:
@@ -5065,6 +5066,19 @@ def _lektor_usun_html(aud) -> str:
 _PRZ_MAGAZYN = None
 _PRZ_SKAN = {'t': 0.0, 'dane': None}
 PRZ_SKAN_TTL_S = 30
+# pozycje do decyzji z plików vaulta (app/pozycje.py, plan 98): skan z tą samą
+# pamięcią podręczną; stan źródeł zapamiętany, żeby rejestr dostał wpis przy
+# ZMIANIE stanu, nie przy każdym żądaniu
+_PRZ_POZ = {'t': 0.0, 'dane': None}
+_PRZ_STANY_ZRODEL = {}
+PRZ_POZ_KATALOG = '_pozycje'            # w katalogu lektora: tekst pozycji do odsłuchu
+PRZ_GRUPY = ('raporty',) + _poz.ZRODLA  # zwijane sekcje listy
+PRZ_FILTRY = ('', 'notatki', 'raporty') + _poz.ZRODLA
+PRZ_NAZWY_GRUP = {'raporty': 'Raporty automatów do przeczytania',
+                  'skill-scout': 'Propozycje skilli (/skill-scout)',
+                  'reflect': 'Zmiany reguł (/reflect)',
+                  'now': 'Otwarte decyzje (NOW.md)',
+                  'now-pending': 'Do wiadomości (NOW-pending.md, briefing)'}
 
 
 def _prz_niedostepne():
@@ -5095,6 +5109,132 @@ async def _prz_notatki(odswiez: bool = False) -> list:
     dane = await loop.run_in_executor(None, _prz.skanuj, _prz_zakres(), kand)
     _PRZ_SKAN.update(t=teraz, dane=dane)
     return dane
+
+
+def _prz_pozycje_katalog():
+    """Katalog plików tekstu pozycji dla lektora (katalog_lektora/_pozycje)
+    albo None (lektor wyłączony, katalog lektora poza katalogiem głównym)."""
+    if not KONF.modul('lektor') or KONF.katalog_lektora is None:
+        return None
+    kl = Path(KONF.katalog_lektora).resolve()
+    if kl != ROOT and ROOT not in kl.parents:
+        return None
+    return kl / PRZ_POZ_KATALOG
+
+
+def prz_tekst_lektora(p: dict) -> str:
+    """Dokładnie to, co widać w wierszu listy: tytuł i krótki tekst."""
+    return f'# {p["tytul"]}\n\n{p["tekst"]}\n'
+
+
+def _prz_zapisz_teksty(pozycje: list, teraz=None) -> dict:
+    """Plik .md z tekstem każdej pozycji w katalogu lektora ({id: plik}).
+    Nazwa z SHA identyfikatora (nigdy z treści). Zapis TYLKO przy zmianie
+    treści — przepisywanie co skan zmieniałoby czas modyfikacji i nagranie
+    wyglądałoby na nieaktualne (przegląd 98b, ustalenie 6). Pliki pozycji
+    nieobecnych w skanie, starsze niż wiek_nagran_dni, są usuwane (sprzataj
+    nagrań plików .md nie rusza). Nigdy nie zapisuje do przesluchania_zakres."""
+    kat = _prz_pozycje_katalog()
+    if kat is None:
+        return {}
+    wynik = {}
+    for p in pozycje:
+        f = kat / p['rodzaj'] / (hashlib.sha256(p['id'].encode('utf-8')).hexdigest()[:16] + '.md')
+        tekst = prz_tekst_lektora(p)
+        try:
+            if not f.is_file() or f.read_bytes() != tekst.encode('utf-8'):
+                f.parent.mkdir(parents=True, exist_ok=True)
+                _prz.zapisz_atomowo(f, tekst)
+            wynik[p['id']] = f
+        except OSError as e:
+            _evlog('przesluchania', f'tekst pozycji dla lektora ({f.name}): {e}', level='warn')
+    if KONF.wiek_nagran_dni > 0 and kat.is_dir():
+        import time as _t
+        granica = (_t.time() if teraz is None else teraz) - KONF.wiek_nagran_dni * 86400
+        biezace = set(wynik.values())
+        for f in sorted(kat.rglob('*.md')):
+            try:
+                if f not in biezace and f.stat().st_mtime < granica:
+                    f.unlink()
+            except OSError:
+                pass
+    return wynik
+
+
+def _prz_loguj_stany(stany: list):
+    """Wpis w rejestrze zdarzeń przy ZMIANIE stanu źródła (brak / nieczytelne
+    = ostrzeżenie; powrót do poprawnego = informacja)."""
+    for st in stany:
+        klucz = (st['stan'], st['powod'])
+        poprzedni = _PRZ_STANY_ZRODEL.get(st['zrodlo'])
+        if poprzedni == klucz:
+            continue
+        _PRZ_STANY_ZRODEL[st['zrodlo']] = klucz
+        if st['stan'] != 'ok':
+            _evlog('przesluchania', st['komunikat'], level='warn')
+        elif poprzedni is not None:
+            _evlog('przesluchania', f'{st["nazwa"]}: źródło znów poprawne')
+
+
+async def _prz_pozycje(odswiez: bool = False) -> tuple:
+    """(pozycje, stany źródeł) z pamięcią podręczną PRZ_SKAN_TTL_S; odczyt
+    plików i zapis tekstów dla lektora w wątku (nie blokuje pętli zdarzeń)."""
+    import time as _t
+    teraz = _t.monotonic()
+    if (not odswiez and _PRZ_POZ['dane'] is not None
+            and teraz - _PRZ_POZ['t'] < PRZ_SKAN_TTL_S):
+        return _PRZ_POZ['dane']
+    loop = asyncio.get_running_loop()
+    pozycje, stany = await loop.run_in_executor(None, _poz.skanuj, _prz_zakres())
+    pliki = await loop.run_in_executor(None, _prz_zapisz_teksty, pozycje)
+    for p in pozycje:
+        p['plik_lektora'] = pliki.get(p['id'])
+    _prz_loguj_stany(stany)
+    _PRZ_POZ.update(t=teraz, dane=(pozycje, stany))
+    return pozycje, stany
+
+
+def _prz_wiersze_pozycji(pozycje: list, stany: list) -> list:
+    """Pozycje z bieżącego skanu + wybory z magazynu → wiersze z zakładką
+    (tabela 3.4 planu 98). Raport przeczytany nie ma zakładki (znika)."""
+    ostatnie = _PRZ_MAGAZYN.ostatnie_wybory()
+    granica = _PRZ_MAGAZYN.potwierdzono_do()
+    zle_zrodla = {s['zrodlo'] for s in stany if s['stan'] != 'ok'}
+    obecne, wynik = set(), []
+    for p in pozycje:
+        obecne.add(p['id'])
+        w = dict(p)
+        if p['rodzaj'] == 'raport':
+            przecz = _PRZ_MAGAZYN.odsluch(p['id']).get('odsluchane')
+            w.update(zakladka=None if przecz else 'raporty', znacznik='', rekord=None)
+        else:
+            rek = ostatnie.get(p['id'])
+            z, zn = _poz.zakladka_wyboru(True, rek, p['odcisk'])
+            w.update(zakladka=z, znacznik=zn, rekord=rek)
+        wynik.append(w)
+    for id_, rek in ostatnie.items():
+        if id_ in obecne:
+            continue
+        z, zn = _poz.zakladka_wyboru(False, rek, None)
+        wynik.append({'rodzaj': rek['zrodlo'], 'id': id_, 'tytul': rek.get('tytul', ''),
+                      'tekst': rek.get('tekst', ''), 'kotwica': rek.get('kotwica') or {},
+                      'zrodlo_plik': (rek.get('kotwica') or {}).get('plik', ''),
+                      'warianty': [], 'odcisk': rek.get('odcisk'), 'znaczniki': {},
+                      'ostrzezenie': '', 'plik_lektora': None, 'kolejnosc': 10 ** 6,
+                      'zakladka': z, 'rekord': rek,
+                      'znacznik': 'niedostepne' if rek['zrodlo'] in zle_zrodla else zn})
+    for w in wynik:
+        rek = w.get('rekord')
+        w['nieprzeniesiony'] = bool(rek and rek['id'] > granica)
+    return wynik
+
+
+def _prz_licznik_pozycji(wp: list) -> dict:
+    lic = {'decyzja': 0, 'rozstrzygniete': 0, 'raporty': 0}
+    for w in wp:
+        if w['zakladka'] in lic:
+            lic[w['zakladka']] += 1
+    return lic
 
 
 def _prz_wiersze(notatki: list) -> list:
@@ -5193,19 +5333,28 @@ async def przesluchania_get(request):
     if co == 'eksport':
         return web.json_response(_prz.eksport_json(_PRZ_MAGAZYN),
                                  headers={'Cache-Control': 'no-store'})
-    wiersze = _prz.grupuj_pomocnicze(
-        _prz_wiersze(await _prz_notatki(odswiez='odswiez' in request.query)))
+    odswiez = 'odswiez' in request.query
+    wiersze = _prz.grupuj_pomocnicze(_prz_wiersze(await _prz_notatki(odswiez=odswiez)))
+    pozycje, stany = await _prz_pozycje(odswiez=odswiez)
+    wp = _prz_wiersze_pozycji(pozycje, stany)
     if co == 'licznik':
-        lic = _prz_licznik(wiersze)
+        lic, lp = _prz_licznik(wiersze), _prz_licznik_pozycji(wp)
+        # kafelek strony startowej czyta do_decyzji (liczba) — suma notatek
+        # i pozycji; raporty do przeczytania liczone osobno (przegląd, ust. 17)
         return _cors_strony_startowej(request, web.json_response(
-            {'do_decyzji': lic['decyzja'], 'zaakceptowane': lic['zaakceptowane'],
-             'nieprzeniesione': len(_PRZ_MAGAZYN.nieprzeniesione())},
+            {'do_decyzji': lic['decyzja'] + lp['decyzja'],
+             'zaakceptowane': lic['zaakceptowane'],
+             'nieprzeniesione': (len(_PRZ_MAGAZYN.nieprzeniesione())
+                                 + len(_PRZ_MAGAZYN.nieprzeniesione_wybory())),
+             'do_decyzji_notatki': lic['decyzja'], 'do_decyzji_pozycje': lp['decyzja'],
+             'raporty_nieprzeczytane': lp['raporty'],
+             'zrodla_problemy': sum(1 for s in stany if s['stan'] != 'ok')},
             headers={'Cache-Control': 'no-store'}))
     z = request.query.get('z') or _PRZ_MAGAZYN.ui('zakladka', 'decyzja')
     if z not in _prz.ZAKLADKI:
         z = 'decyzja'
     tylko = bool(_PRZ_MAGAZYN.ui('tylko_nagrane', False))
-    return web.Response(text=render_przesluchania_page(wiersze, z, tylko),
+    return web.Response(text=render_przesluchania_page(wiersze, z, tylko, wp, stany),
                         content_type='text/html', headers={'Cache-Control': 'no-store'})
 
 
@@ -5227,6 +5376,33 @@ async def przesluchania_post(request):
     co = request.query.get('przesluchania', '')
     d = await _prz_json(request)
     try:
+        if co == 'ui' and ('zwiniete' in d or 'zrodlo' in d):
+            # stan widoku pozycji (zwinięte sekcje, filtr źródła) — przeżywa F5
+            zw, zr = d.get('zwiniete'), d.get('zrodlo')
+            if 'zwiniete' in d and (not isinstance(zw, list)
+                                    or any(x not in PRZ_GRUPY for x in zw)):
+                return web.Response(status=400, text='Pole „zwiniete”: lista z '
+                                    + ', '.join(PRZ_GRUPY))
+            if 'zrodlo' in d and zr not in PRZ_FILTRY:
+                return web.Response(status=400, text=f'Nieznany filtr źródła: {zr!r}')
+            wynik = {}
+            if 'zwiniete' in d:
+                wynik['zwiniete'] = sorted(set(zw))
+                _PRZ_MAGAZYN.ustaw_ui('zwiniete', wynik['zwiniete'])
+            if 'zrodlo' in d:
+                wynik['zrodlo'] = zr
+                _PRZ_MAGAZYN.ustaw_ui('zrodlo', zr)
+            return web.json_response(wynik)
+        if co == 'wybor':
+            return await _prz_wybor_post(d)
+        if co == 'przeczytane':
+            id_ = d.get('id_pozycji')
+            pozycje, _ = await _prz_pozycje()
+            if not isinstance(id_, str) or not id_.startswith('raport:') or \
+                    not any(p['id'] == id_ for p in pozycje):
+                return web.Response(status=404, text='Nie ma takiego raportu w bieżącym '
+                                    'odczycie źródeł — odśwież listę (🔄).')
+            return web.json_response(_PRZ_MAGAZYN.ustaw_odsluch(id_, odsluchane=True))
         if co == 'ui' and 'tylko_nagrane' in d:
             t = d.get('tylko_nagrane')
             if not isinstance(t, bool):
@@ -5253,6 +5429,26 @@ async def przesluchania_post(request):
         _evlog('przesluchania', str(e), level='error')
         return web.Response(status=500, text=f'BŁĄD zapisu stanu: {e}')
     return web.Response(status=400, text=f'Nieznane polecenie: {co!r}')
+
+
+async def _prz_wybor_post(d: dict):
+    """POST /?przesluchania=wybor {id_pozycji, wybor, uwaga}. Serwer szuka
+    pozycji w BIEŻĄCYM skanie (klient nie podaje treści ani odcisku);
+    powtórzone kliknięcie zwraca ten sam rekord z powtorzenie=true."""
+    id_, wybor, uwaga = d.get('id_pozycji'), d.get('wybor'), d.get('uwaga') or ''
+    if not isinstance(id_, str) or not isinstance(wybor, str) or not isinstance(uwaga, str):
+        return web.Response(status=400, text='Pola „id_pozycji”, „wybor”, „uwaga” muszą być tekstem.')
+    pozycje, _ = await _prz_pozycje()
+    p = next((x for x in pozycje if x['id'] == id_ and x['rodzaj'] != 'raport'), None)
+    if p is None:
+        return web.Response(status=404, text='Tej pozycji nie ma w bieżącym odczycie '
+                            'źródła (vault odświeżony?) — odśwież listę (🔄).')
+    rek, powt = _PRZ_MAGAZYN.dodaj_wybor(p, wybor, uwaga)
+    if not powt:
+        # bez treści uwagi (przegląd 98b, ustalenie 17)
+        _evlog('przesluchania', f'wybór id {rek["id"]}: {rek["zrodlo"]} · '
+               f'{rek["id_pozycji"]} · {rek["wybor"]}')
+    return web.json_response(dict(rek, powtorzenie=powt))
 
 
 def _prz_notatka(request):
@@ -5349,6 +5545,23 @@ PRZ_STYLE = (
     '.st.p{background:#3a3320;color:#f0d68a}'
     '.pusto{color:#8a93a0;text-align:center;margin:3em 1em}'
     '.stopka{color:#8a93a0;font-size:.8em;text-align:center;margin:2em 0}'
+    # pozycje do decyzji (plan 98): przyciski ≥ 44 px, pole uwagi pełnej szerokości
+    '.dec{display:flex;gap:.5em;flex-wrap:wrap;margin-top:.55em;align-items:center}'
+    '.dec button{min-height:44px;font:inherit;font-size:.9em;padding:.3em 1em;'
+    'background:#232731;color:#cfe3ff;border:1px solid #3a4352;border-radius:8px;cursor:pointer}'
+    '.dec button.on{background:#1a5fb4;border-color:#1a5fb4;color:#fff}'
+    '.dec .uw{flex:1 1 100%;min-height:44px;box-sizing:border-box;font:inherit;font-size:.9em;'
+    'background:#14161c;color:#e8e9ec;border:1px solid #343a45;border-radius:8px;padding:.3em .6em}'
+    '.dec-st{color:#ff8a80;font-size:.85em}'
+    '.zn{border-radius:5px;padding:0 .4em;background:#1d4a2e;color:#9fe0b0}'
+    '.zn.zm{background:#5a4510;color:#f0d68a;display:inline-block;margin-top:.3em}'
+    '.zr-blad{background:#5a1f1f;color:#ffb4ab;border-radius:8px;padding:.5em .8em;margin:.4em 0}'
+    '.zr-ok{color:#8a93a0;font-size:.8em;margin:.3em .2em}.zr-ok summary{cursor:pointer;min-height:32px}'
+    'details.grp>summary{cursor:pointer;min-height:40px;display:flex;align-items:center}'
+    '.zrl{color:#7ab7ff;text-decoration:none;word-break:break-all}'
+    '.lek audio{width:100%;margin-top:.3em}'
+    '#fzr{font:inherit;background:#232731;color:#cfd6df;border:1px solid #343a45;'
+    'border-radius:6px;min-height:40px}'
 )
 
 
@@ -5388,8 +5601,166 @@ PRZ_LEKTOR_JS = (
 )
 
 
-def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool = False) -> str:
+def _prz_lek_html(w: dict, prog, audio: bool = False) -> str:
+    """Stan nagrania lektora wiersza listy + „🔊 generuj” (notatka albo plik
+    tekstu pozycji); audio=True → odtwarzacz gotowego nagrania w wierszu."""
+    sn = _prz_stan_nagrania(w, prog)
+    return (f'<div class="lek {sn["rodzaj"]}" data-p="{_esc(_rel_root(w["plik"]))}"'
+            + (f' data-job="{sn["job"]}"' if sn.get('job') else '') + '>'
+            f'<span class="lst-st">{_esc(sn["napis"])}</span>'
+            + (f'<span class="lst-stare" style="display:block;color:#e0a33a;'
+               f'font-size:.85em">{_esc(sn["stare"])}</span>' if sn.get('stare') else '')
+            + (f'<progress max="100" value="{sn["pct"]}"></progress>'
+               if sn.get('pct') is not None else '')
+            + (f'<button class="gen" data-u="{w["url"]}" '
+               f'data-n="{_esc(Path(w["plik"]).name)}">🔊 generuj</button>'
+               if sn['rodzaj'] in ('brak', 'blad') else '')
+            + (f'<button class="nagrajteraz" data-u="{_esc(sn["teraz"])}">'
+               '🔄 nagraj teraz</button>' if sn.get('teraz') else '')
+            + (f'<audio controls preload="none" src="{_url_abs(w["nagranie_plik"])}"></audio>'
+               if audio and sn['rodzaj'] == 'gotowe' else '')
+            + '</div>')
+
+
+PRZ_NAZWY_TYPOW = {'new': 'nowy', 'update': 'aktualizacja'}
+
+
+def _prz_znacznik_html(w: dict) -> str:
+    rek, zn = w.get('rekord'), w.get('znacznik')
+    if not rek:
+        return ''
+    napis = next((x['napis'] for x in list(w.get('warianty') or ()) + list(
+        _poz.WARIANTY_DOMYSLNE + _poz.WARIANTY_PRZYJETE) if x['kod'] == rek['wybor']),
+        rek['wybor'])
+    kiedy = rek['czas'][:16].replace('T', ' ')
+    if zn == 'zmieniona':
+        return f'<span class="zn zm">⚠ treść zmieniona po decyzji z {_esc(kiedy)}</span>'
+    opis = {'zgodny': ('⏳ czeka na przeniesienie do vaulta' if w['nieprzeniesiony']
+                       else 'przeniesione, czeka na odświeżenie vaulta'),
+            'usuniete': 'usunięte ze źródła — naniesione',
+            'niedostepne': 'źródło niedostępne — migawka z chwili decyzji'}.get(zn, '')
+    return (f'<span class="zn">wybór: {_esc(napis)} ({_esc(kiedy)})'
+            + (f' · {_esc(opis)}' if opis else '') + '</span>')
+
+
+def _prz_pozycja_html(w: dict, prog, lektor_on: bool) -> str:
+    zn = w.get('znaczniki') or {}
+    etykieta = [w['rodzaj']]
+    if zn.get('typ'):
+        etykieta.append(PRZ_NAZWY_TYPOW.get(zn['typ'], zn['typ']))
+    if zn.get('priorytet') is not None and w['rodzaj'] == 'skill-scout':
+        etykieta.append(f'priorytet {zn["priorytet"]}')
+    if zn.get('cel'):
+        etykieta.append(f'zmienia: {zn["cel"]}')
+    if zn.get('powtorzenia', 1) > 1:
+        etykieta.append(f'{zn["powtorzenia"]}× w pliku')
+    if zn.get('automat'):
+        etykieta = ['raport', zn['automat']]
+    zrodlo = ''
+    if w.get('zrodlo_plik'):
+        try:
+            url = '/' + quote(_rel_root(_prz_zakres() / w['zrodlo_plik']))
+            zrodlo = (f'<div class="sub">źródło: <a class="zrl" href="{url}">'
+                      f'{_esc(w["zrodlo_plik"])}</a></div>')
+        except (OSError, ValueError):
+            zrodlo = f'<div class="sub">źródło: {_esc(w["zrodlo_plik"])}</div>'
+    lek = ''
+    if lektor_on and w.get('plik_lektora') is not None:
+        f = Path(w['plik_lektora'])
+        lek = _prz_lek_html({'plik': f, 'url': '/' + quote(_rel_root(f)),
+                             'nagranie_plik': _lektor_audio_for(f)}, prog, audio=True)
+    if w['rodzaj'] == 'raport':
+        dec = '<div class="dec"><button class="przecz">✓ przeczytane</button></div>'
+    elif w.get('warianty'):
+        wyb = (w.get('rekord') or {}).get('wybor')
+        dec = ('<div class="dec">' + ''.join(
+            f'<button class="wyb{" on" if x["kod"] == wyb else ""}" data-k="{_esc(x["kod"])}">'
+            f'{_esc(x["napis"])}</button>' for x in w['warianty'])
+            + '<input class="uw" maxlength="4000" placeholder="uwaga (opcjonalnie)">'
+            '<span class="dec-st"></span></div>')
+    else:
+        dec = ''
+    ostrz = (f'<div class="zn zm">⚠ {_esc(w["ostrzezenie"])}</div>'
+             if w.get('ostrzezenie') else '')
+    return (f'<div class="row poz" data-id="{_esc(w["id"])}">'
+            f'<div class="mt"><span class="st">{_esc(" · ".join(map(str, etykieta)))}</span>'
+            f'{_prz_znacznik_html(w)}</div>'
+            f'<div class="tt">{_esc(w["tytul"])}</div>'
+            f'<div class="dw">{_esc(w["tekst"])}</div>{ostrz}{zrodlo}{lek}{dec}</div>')
+
+
+def _prz_pozycje_html(wp: list, stany: list, zakladka: str, filtr: str, zwiniete,
+                      prog, lektor_on: bool) -> str:
+    """Pasek stanów źródeł + sekcje pozycji w zakładce (raporty, potem
+    grupy wg źródła; kolejność pozycji jak w źródle)."""
+    if zakladka not in ('decyzja', 'rozstrzygniete'):
+        return ''
+    czesci = []
+    if zakladka == 'decyzja':
+        for st in stany or ():
+            if st['stan'] != 'ok':
+                czesci.append(f'<div class="zr-blad">⚠ {_esc(st["komunikat"])}</div>')
+        ok = [st for st in stany or () if st['stan'] == 'ok']
+        if ok:
+            czesci.append('<details class="zr-ok"><summary>źródła poprawne: '
+                          f'{len(ok)} z {len(stany)}</summary>'
+                          + ''.join(f'<div>{_esc(st["komunikat"])}</div>' for st in ok)
+                          + '</details>')
+    grupy = PRZ_GRUPY if zakladka == 'decyzja' else _poz.ZRODLA
+    for g in grupy:
+        if filtr and filtr != g:
+            continue
+        cel = 'raporty' if g == 'raporty' else zakladka
+        rz = [w for w in wp if w['zakladka'] == cel
+              and (g == 'raporty' or w['rodzaj'] == g)]
+        if not rz:
+            continue
+        rz.sort(key=lambda w: (w['kolejnosc'], w['id']))
+        czesci.append(
+            f'<details class="grp" data-g="{g}"{"" if g in zwiniete else " open"}>'
+            f'<summary class="prj">{_esc(PRZ_NAZWY_GRUP[g])} ({len(rz)})</summary>'
+            + ''.join(_prz_pozycja_html(w, prog, lektor_on) for w in rz) + '</details>')
+    return ''.join(czesci)
+
+
+# Pozycje do decyzji (plan 98): przycisk wyboru → POST /?przesluchania=wybor
+# (uwaga z pola obok), „✓ przeczytane” przy raporcie, zwinięcie sekcji i filtr
+# źródła zapisywane na serwerze (przeżywają F5).
+PRZ_POZYCJE_JS = (
+    '<script>' + JS_ZAPIS + '(function(){'
+    'const J={"Content-Type":"application/json"};'
+    'async function ui(d){try{await afFetch("/?przesluchania=ui",{method:"POST",'
+    'headers:J,body:JSON.stringify(d)});}catch(e){}}'
+    'document.querySelectorAll(".poz .dec button").forEach(b=>b.onclick=async()=>{'
+    'const r=b.closest(".poz"),st=r.querySelector(".dec-st"),u=r.querySelector(".uw");'
+    'const raport=b.classList.contains("przecz");'
+    'const d=raport?{id_pozycji:r.dataset.id}:'
+    '{id_pozycji:r.dataset.id,wybor:b.dataset.k,uwaga:u?u.value:""};'
+    'b.disabled=true;let o;'
+    'try{o=await afFetch(raport?"/?przesluchania=przeczytane":"/?przesluchania=wybor",'
+    '{method:"POST",headers:J,body:JSON.stringify(d)});}'
+    'catch(e){b.disabled=false;if(st)st.textContent="⚠ brak połączenia";return;}'
+    'if(o.ok){location.reload();return;}'
+    'b.disabled=false;const t=await o.text();if(st)st.textContent="⚠ "+t;else alert(t);});'
+    'document.querySelectorAll("details.grp").forEach(g=>g.addEventListener("toggle",()=>'
+    'ui({zwiniete:[...document.querySelectorAll("details.grp")].filter(x=>!x.open)'
+    '.map(x=>x.dataset.g)})));'
+    'const f=document.getElementById("fzr");'
+    'if(f)f.onchange=async()=>{await ui({zrodlo:f.value});location.reload();};'
+    '})();</script>'
+)
+
+
+def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool = False,
+                              wp: list = (), stany: list = ()) -> str:
     lic = _prz_licznik(wiersze)
+    lp = _prz_licznik_pozycji(wp)
+    lic['decyzja'] += lp['decyzja']
+    lic['rozstrzygniete'] += lp['rozstrzygniete']
+    filtr = _PRZ_MAGAZYN.ui('zrodlo', '') or ''
+    if filtr not in PRZ_FILTRY:
+        filtr = ''
+    zwiniete = set(_PRZ_MAGAZYN.ui('zwiniete', []) or [])
     lektor_on = KONF.modul('lektor')
     prog = _lektor_progress()
     tabs = ''.join(
@@ -5401,6 +5772,8 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
                     and (not tylko_nagrane or w['nagranie'])),
                    key=lambda w: (w.get('kolejnosc') is None, w.get('kolejnosc') or 0,
                                   w['projekt'].lower(), -w['mtime']))
+    if filtr not in ('', 'notatki'):
+        pokaz = []
     czesci, projekt = [], None
     for w in pokaz:
         if w['projekt'] != projekt:
@@ -5421,22 +5794,7 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
             znaczniki.append('⏳ czeka na przeniesienie do vaulta')
         # 02.10 (Karol: „muszę widzieć, które dokumenty mają gotowe pliki do
         # odsłuchu"): stan nagrania przy każdej pozycji + generowanie z listy
-        lek = ''
-        if lektor_on:
-            sn = _prz_stan_nagrania(w, prog)
-            lek = (f'<div class="lek {sn["rodzaj"]}" data-p="{_esc(_rel_root(w["plik"]))}"'
-                   + (f' data-job="{sn["job"]}"' if sn.get('job') else '') + '>'
-                   f'<span class="lst-st">{_esc(sn["napis"])}</span>'
-                   + (f'<span class="lst-stare" style="display:block;color:#e0a33a;'
-                      f'font-size:.85em">{_esc(sn["stare"])}</span>' if sn.get('stare') else '')
-                   + (f'<progress max="100" value="{sn["pct"]}"></progress>'
-                      if sn.get('pct') is not None else '')
-                   + (f'<button class="gen" data-u="{w["url"]}" '
-                      f'data-n="{_esc(Path(w["plik"]).name)}">🔊 generuj</button>'
-                      if sn['rodzaj'] in ('brak', 'blad') else '')
-                   + (f'<button class="nagrajteraz" data-u="{_esc(sn["teraz"])}">'
-                      '🔄 nagraj teraz</button>' if sn.get('teraz') else '')
-                   + '</div>')
+        lek = _prz_lek_html(w, prog) if lektor_on else ''
         opis = ''
         if w.get('do_wdrozenia'):
             opis += f'<div class="dw">{_esc(w["do_wdrozenia"])}</div>'
@@ -5450,10 +5808,18 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
             f'<div class="sub">{_esc(w["tytul"])} · {_esc(Path(w["sciezka"]).parent.as_posix())}'
             f'</div><div class="mt">{"".join(f"<span>{z}</span>" for z in znaczniki)}'
             f'</div>{opis}</a>{lek}' + _prz_zalaczniki_html(w) + '</div>')
-    tresc = ''.join(czesci) or (
+    poz_html = ('' if filtr == 'notatki' else
+                _prz_pozycje_html(wp, stany, zakladka, filtr, zwiniete, prog, lektor_on))
+    if czesci and poz_html:
+        czesci.insert(0, '<div class="prj grp-not">Notatki</div>')
+    tresc = poz_html + (''.join(czesci) or (
         f'<div class="pusto">Brak notatek w zakładce „{_esc(_prz.NAZWY_ZAKLADEK[zakladka])}”.'
-        '</div>')
-    nieprz = len(_PRZ_MAGAZYN.nieprzeniesione())
+        '</div>'))
+    filtry = ''.join(
+        f'<option value="{f}"{" selected" if f == filtr else ""}>'
+        f'{_esc({"": "wszystkie źródła", "notatki": "tylko notatki"}.get(f) or PRZ_NAZWY_GRUP[f])}'
+        '</option>' for f in PRZ_FILTRY)
+    nieprz = len(_PRZ_MAGAZYN.nieprzeniesione()) + len(_PRZ_MAGAZYN.nieprzeniesione_wybory())
     return (
         '<!doctype html><meta charset=utf-8>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -5467,7 +5833,8 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
            + ('☑' if tylko_nagrane else '☐') + ' tylko z nagraniem</button>'
            if lektor_on else '') +
         '</div>'
-        f'<div class="tabs">{tabs}</div></div>'
+        f'<div class="tabs">{tabs}</div>'
+        f'<div class="bar"><label>pokaż: <select id="fzr">{filtry}</select></label></div></div>'
         f'<div class="lst">{tresc}'
         f'<div class="stopka">Decyzje nieprzeniesione do vaulta: {nieprz} · '
         '<a href="/?przesluchania=eksport" style="color:#7ab7ff">eksport</a></div></div>'
@@ -5482,7 +5849,7 @@ def render_przesluchania_page(wiersze: list, zakladka: str, tylko_nagrane: bool 
         'headers:{"Content-Type":"application/json"},'
         'body:JSON.stringify({tylko_nagrane:!tn.classList.contains("on")})});}'
         'catch(e){}location.reload();};'
-        '})();</script>'
+        '})();</script>' + PRZ_POZYCJE_JS
         + (PRZ_LEKTOR_JS + NAGRAJ_TERAZ_JS if lektor_on else ''))
 
 
@@ -6001,8 +6368,12 @@ def utworz_aplikacje(k):
     global _PRZ_MAGAZYN
     _PRZ_MAGAZYN = None
     _PRZ_SKAN.update(t=0.0, dane=None)
+    _PRZ_POZ.update(t=0.0, dane=None)
+    _PRZ_STANY_ZRODEL.clear()
     if k.modul('przesluchania'):
         _PRZ_MAGAZYN = _prz.Magazyn(k.przesluchania_stan, k.przesluchania_eksport)
+        if _PRZ_MAGAZYN.tylko_odczyt:
+            _evlog('przesluchania', f'stan: {_PRZ_MAGAZYN.tylko_odczyt}', level='error')
         if _PRZ_MAGAZYN.uszkodzony:
             _evlog('przesluchania', f'stan nieczytelny: {_PRZ_MAGAZYN.uszkodzony}',
                    level='error')

@@ -110,8 +110,31 @@ ale serwuje dowolne drzewo katalogów.
 - eksport dla agenta przenoszącego decyzje do vaulta: `katalog_danych/przesluchania-eksport.md`
   i `GET /?przesluchania=eksport` (JSON); potwierdzenie `POST /?przesluchania=potwierdz`
   `{"do": id}` (powtarzalne)
-- `GET /?przesluchania=licznik` — liczba notatek do decyzji dla kafelka strony startowej;
+- `GET /?przesluchania=licznik` — liczba pozycji do decyzji dla kafelka strony startowej
+  (`do_decyzji` = notatki + pozycje z plików vaulta; osobno `do_decyzji_notatki`,
+  `do_decyzji_pozycje`, `raporty_nieprzeczytane`, `zrodla_problemy`, `nieprzeniesione`);
   zgoda CORS z ciasteczkiem tylko dla originu z `strona_startowa`
+- **pozycje do decyzji z plików vaulta** (`app/pozycje.py`, plan 98) — każda osobno, z przyciskami
+  i polem uwagi: propozycje `/skill-scout` (`Zasoby/raporty/skill-scout/_proposed.json`; bez
+  propozycji, które są już skillem w `.claude/skills/<slug>/SKILL.md`), sekcje `##`
+  z `Zasoby/Jarwis-vault-i-skille/_reflect-pending.md`, linie `- [ ]` z `## Otwarte decyzje`
+  w `.claude/rules/NOW.md` (przyciski A/B, gdy treść podaje warianty) i wpisy `###` ze wszystkich
+  sekcji `## Decyzje do briefingu` w `NOW-pending.md` („Przyjąłem do wiadomości”; wpisy
+  `### Wykonawca:` pominięte); do tego najnowszy raport `/skill-scout`, pamięci (`/daily`,
+  `/memory-update`) i `/reflect` do przeczytania („✓ przeczytane”). Ścieżki względem
+  `przesluchania_zakres`
+- każde źródło ma stan: poprawne (także 0 pozycji) / brak pliku / nieczytelne — dwa ostatnie to
+  czerwony pasek na liście i wpis w rejestrze zdarzeń przy zmianie stanu
+- kliknięcie zapisuje rekord wyboru w `przesluchania.json` (`POST /?przesluchania=wybor`
+  `{id_pozycji, wybor, uwaga}`; powtórzone kliknięcie nie dubluje rekordu); pozycja przechodzi
+  do „Rozstrzygnięte” i wraca do „Do decyzji” tylko, gdy jej treść w źródle się zmieni. Wybory
+  są w eksporcie JSON (`wybory`) i Markdown (sekcja „Wybory w pozycjach”), potwierdzane tym samym
+  `potwierdz`. Zwinięte sekcje i filtr źródła zapisywane na serwerze (przeżywają F5)
+- lektor pozycji czyta dokładnie tekst z wiersza: plik `katalog_lektora/_pozycje/<źródło>/<skrót>.md`
+  (zapisywany tylko przy zmianie treści, sprzątany po `wiek_nagran_dni`)
+- `narzedzia/pobierz_decyzje.py` (laptop) — loguje się, pobiera eksport i wypisuje, co dokładnie
+  zmienić w którym pliku vaulta; `--potwierdz` po naniesieniu. Schemat rekordu i procedura:
+  [`docs/decyzje-w-liscie.md`](docs/decyzje-w-liscie.md)
 
 **Bezpieczeństwo:**
 - HTTP Basic Auth (konfigurowany przez env; pusty `SERVER_PASS` = open access,
