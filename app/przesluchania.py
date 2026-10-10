@@ -16,6 +16,14 @@ nigdy nie jest zapisywany.
 Model decyzji ma od razu pola na przyszłe porcje: `zakres` (dziś tylko
 „notatka”; później „akapit”, „fragment”), `kotwica` (cytat, nagłówek, odcisk
 akapitu), `zrodlo_uwagi` (dziś „tekst”; później „glos”).
+
+Wersja 2 stanu (plan 98, 10.10.2026): lista `wybory` — decyzje przy POZYCJACH
+z plików vaulta (propozycja skill-scouta, sekcja /reflect, linia „Otwarte
+decyzje” NOW.md, wpis briefingu; `app/pozycje.py`). Wspólny licznik `id`
+i wspólne potwierdzenie z decyzjami notatek — jeden eksport, jedno
+`potwierdz`. Plik wersji 1 wczytuje się bez strat; plik nowszej wersji niż
+kod jest tylko do odczytu (każdy zapis = BladStanu), żeby cofnięcie kodu
+niczego nie skasowało.
 """
 import hashlib
 import json
@@ -27,7 +35,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-WERSJA_STANU = 1
+WERSJA_STANU = 2
 
 STATUSY = ('do-akceptacji', 'zaakceptowane-niewdrozone', 'wdrozone',
            'do-poprawy', 'odrzucone')
@@ -401,12 +409,13 @@ class Magazyn:
         self.eksport_md = Path(eksport_md) if eksport_md else None
         self._blokada = threading.Lock()
         self.uszkodzony = None          # opis odłożonego, nieczytelnego pliku stanu
+        self.tylko_odczyt = None        # opis: stan z nowszej wersji — zapis wstrzymany
         self._stan = self._wczytaj()
 
     @staticmethod
     def _pusty() -> dict:
         return {'wersja': WERSJA_STANU, 'nastepne_id': 1, 'potwierdzono_do': 0,
-                'decyzje': [], 'odsluch': {}, 'ui': {}}
+                'decyzje': [], 'wybory': [], 'odsluch': {}, 'ui': {}}
 
     def _wczytaj(self) -> dict:
         if not self.plik.exists():
@@ -429,9 +438,21 @@ class Magazyn:
         pusty = self._pusty()
         for k, v in pusty.items():
             stan.setdefault(k, v)
+        try:
+            wersja = int(stan.get('wersja') or 1)
+        except (TypeError, ValueError):
+            wersja = 1
+        if wersja > WERSJA_STANU:
+            # kod cofnięty za plik stanu: czytamy, ale nie nadpisujemy formatu,
+            # którego nie znamy (przegląd 98b, ustalenie 10)
+            self.tylko_odczyt = (f'stan z nowszej wersji {wersja} (kod zna {WERSJA_STANU})'
+                                 ' — zapis wstrzymany')
         return stan
 
     def _zapisz(self):
+        if self.tylko_odczyt:
+            raise BladStanu(f'{self.plik.name}: {self.tylko_odczyt}')
+        self._stan['wersja'] = WERSJA_STANU
         try:
             zapisz_atomowo(self.plik, json.dumps(self._stan, ensure_ascii=False, indent=1))
             if self.eksport_md is not None:
@@ -483,6 +504,8 @@ class Magazyn:
         if decyzja == 'do-poprawy' and not uwaga:
             raise ValueError('„Do poprawy” wymaga uwagi — co poprawić?')
         with self._blokada:
+            if self.tylko_odczyt:
+                self._zapisz()          # BladStanu, nic nie dopisane
             wpis = {
                 'id': self._stan['nastepne_id'],
                 'sciezka': sciezka,
@@ -509,6 +532,8 @@ class Magazyn:
     def ustaw_odsluch(self, sciezka: str, pozycja_s: float = None,
                       odsluchane: bool = False, teraz=None) -> dict:
         with self._blokada:
+            if self.tylko_odczyt:
+                self._zapisz()          # BladStanu, stan w pamięci bez zmian
             o = self._stan['odsluch'].setdefault(sciezka, {})
             if pozycja_s is not None:
                 o['pozycja_s'] = round(max(0.0, float(pozycja_s)), 1)
@@ -519,8 +544,69 @@ class Magazyn:
 
     def ustaw_ui(self, klucz: str, wartosc):
         with self._blokada:
+            if self.tylko_odczyt:
+                self._zapisz()          # BladStanu, stan w pamięci bez zmian
             self._stan['ui'][klucz] = wartosc
             self._zapisz()
+
+    # wybory przy pozycjach z plików vaulta (plan 98)
+    def wybory(self) -> list:
+        with self._blokada:
+            return [dict(w) for w in self._stan['wybory']]
+
+    def ostatnie_wybory(self) -> dict:
+        """{id pozycji: ostatni wybór} — obowiązuje ostatni rekord."""
+        wynik = {}
+        for w in self.wybory():
+            wynik[w['id_pozycji']] = w
+        return wynik
+
+    def nieprzeniesione_wybory(self) -> list:
+        with self._blokada:
+            granica = self._stan['potwierdzono_do']
+            return [dict(w) for w in self._stan['wybory'] if w['id'] > granica]
+
+    def dodaj_wybor(self, pozycja: dict, wybor: str, uwaga: str, teraz=None) -> tuple:
+        """Rekord wyboru Karola przy pozycji z bieżącego skanu (serwer podaje
+        pozycję — odcisk i migawka nie pochodzą od klienta). Zwraca
+        (rekord, powtorzenie): to samo kliknięcie drugi raz (ten sam wybór,
+        uwaga i odcisk co OSTATNI rekord pozycji) nie tworzy nowego rekordu."""
+        kody = [w['kod'] for w in pozycja.get('warianty') or ()]
+        if wybor not in kody:
+            raise ValueError(f'wybór {wybor!r} spoza wariantów pozycji: {", ".join(kody) or "brak"}')
+        uwaga = (uwaga or '').strip()
+        if len(uwaga) > LIMIT_UWAGI:
+            raise ValueError(f'uwaga dłuższa niż {LIMIT_UWAGI} znaków')
+        with self._blokada:
+            ostatni = None
+            for w in self._stan['wybory']:
+                if w['id_pozycji'] == pozycja['id']:
+                    ostatni = w
+            if (ostatni is not None and ostatni['wybor'] == wybor
+                    and ostatni['uwaga'] == uwaga and ostatni['odcisk'] == pozycja['odcisk']):
+                return dict(ostatni), True
+            t = datetime.now() if teraz is None else datetime.fromtimestamp(teraz)
+            wpis = {
+                'id': self._stan['nastepne_id'],
+                'czas': t.astimezone().isoformat(timespec='seconds'),
+                'zrodlo': pozycja['rodzaj'],
+                'id_pozycji': pozycja['id'],
+                'wybor': wybor,
+                'uwaga': uwaga,
+                'odcisk': pozycja['odcisk'],
+                'tytul': pozycja.get('tytul', ''),
+                'tekst': pozycja.get('tekst', ''),
+                'kotwica': dict(pozycja.get('kotwica') or {}),
+            }
+            self._stan['wybory'].append(wpis)
+            self._stan['nastepne_id'] += 1
+            try:
+                self._zapisz()
+            except BladStanu:
+                self._stan['wybory'].pop()
+                self._stan['nastepne_id'] -= 1
+                raise
+            return dict(wpis), False
 
     def potwierdz(self, do_id: int) -> int:
         """Agent laptopa przeniósł decyzje do vaulta aż do do_id włącznie.
@@ -552,6 +638,9 @@ def eksport_markdown(stan: dict) -> str:
     do vaulta, docelowy `status:` każdej notatki i gotowe linie do to_do.md."""
     granica = stan.get('potwierdzono_do', 0)
     nowe = [d for d in stan.get('decyzje', []) if d['id'] > granica]
+    wyb = [w for w in stan.get('wybory', []) if w['id'] > granica]
+    # „do” potwierdzenia = ostatni id OBU list (przegląd 98b, ustalenie 12)
+    do = max([d['id'] for d in nowe] + [w['id'] for w in wyb], default=granica)
     ostatnie = {}
     for d in nowe:
         ostatnie[d['sciezka']] = d
@@ -562,7 +651,7 @@ def eksport_markdown(stan: dict) -> str:
          'ustaw w nagłówku `status:` na wartość z kolumny „Nowy status”; '
          '(2) dopisz linie z sekcji „Do kolejki zadań” do `Zadania/to_do.md`; '
          '(3) zatwierdź i wypchnij vault; (4) potwierdź: POST '
-         f'`/?przesluchania=potwierdz` z treścią `{{"do": {nowe[-1]["id"] if nowe else granica}}}` '
+         f'`/?przesluchania=potwierdz` z treścią `{{"do": {do}}}` '
          '(nagłówek `X-AnberFiles: 1`). Powtórzenie procedury niczego nie dubluje.', '',
          '## Status', '',
          '| Notatka | Nowy status | Decyzja | Kiedy | id |', '|---|---|---|---|---|']
@@ -578,19 +667,34 @@ def eksport_markdown(stan: dict) -> str:
                  f'{NAZWY_DECYZJI[d["decyzja"]]}' + (f' — {d["uwaga"]}' if d['uwaga'] else ''))
     if not nowe:
         w.append('(brak)')
+    if wyb:
+        w += ['', '## Wybory w pozycjach', '',
+              'Pozycje z plików vaulta (propozycje skilli, /reflect, NOW.md, briefing). '
+              'Co dokładnie zmienić w pliku — `narzedzia/pobierz_decyzje.py`.', '',
+              '| id | Kiedy | Źródło | Pozycja | Wybór | Uwaga | Miejsce naniesienia |',
+              '|---|---|---|---|---|---|---|']
+        for x in wyb:
+            miejsce = ' · '.join(f'{k}: {v}' for k, v in (x.get('kotwica') or {}).items())
+            w.append(f'| {x["id"]} | {x["czas"]} | {x["zrodlo"]} | {_komorka(x.get("tytul", ""))} | '
+                     f'{x["wybor"]} | {_komorka(x["uwaga"])} | {_komorka(miejsce)} |')
     return '\n'.join(w) + '\n'
 
 
 def eksport_json(magazyn: Magazyn) -> dict:
     nowe = magazyn.nieprzeniesione()
+    wyb = magazyn.nieprzeniesione_wybory()
     ostatnie = {}
     for d in nowe:
         ostatnie[d['sciezka']] = d
+    for w in wyb:
+        w['przeniesione'] = False
     return {
         'potwierdzono_do': magazyn.potwierdzono_do(),
-        'ostatnie_id': nowe[-1]['id'] if nowe else magazyn.potwierdzono_do(),
+        'ostatnie_id': max([d['id'] for d in nowe] + [w['id'] for w in wyb],
+                           default=magazyn.potwierdzono_do()),
         'decyzje': nowe,
         'statusy': {s: d['status'] for s, d in ostatnie.items()},
         'do_kolejki': [linia_todo(d) for d in ostatnie.values()
                        if d['decyzja'] == 'do-poprawy'],
+        'wybory': wyb,
     }
