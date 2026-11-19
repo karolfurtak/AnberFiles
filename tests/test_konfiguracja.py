@@ -60,10 +60,17 @@ def test_instancja_jarvis_z_przykladu(tmp_path):
     assert k.katalog_glowny == tmp_path / 'srv' / 'korzen'
     assert k.katalog_lektora == tmp_path / 'srv' / 'korzen' / 'lektor'
     assert k.katalog_eksportu == tmp_path / 'srv' / 'eksport'
-    oczek = {'podglad_docx': True, 'eksport_docx': False, 'lektor': True,
+    # 19.11.2026 (Karol: „ujednolicić do wersji najnowszej”): DOCX także na
+    # Jarvisie (wynik w katalogu danych), podgląd pdf.js, partner Sprawozdania
+    oczek = {'podglad_docx': True, 'eksport_docx': True, 'lektor': True,
              'lektor_opisy_ai': False, 'wylaczanie': False, 'druk': True,
-             'bateria': False, 'kadrowanie': False}
+             'bateria': False, 'kadrowanie': False, 'podglad_pdfjs': True,
+             'przenoszenie': False}
     assert {n: k.modul(n) for n in oczek} == oczek
+    assert k.eksport_docx_dostepny is True
+    assert k.katalog_wyniku_docx == tmp_path / 'srv' / 'dane' / 'eksport-docx'
+    assert k.katalog_silnika_docx == Path('/mnt/data/sprawozdania/EXPORT')
+    assert k.partner_nazwa == 'Sprawozdania' and k.partner_adres.endswith(':8766')
 
 
 def test_przyklad_jarvis_bez_adresow_ip_i_hasel():

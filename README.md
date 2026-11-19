@@ -240,6 +240,59 @@ repozytorium**, a wskazuje go zmienna `ANBERFILES_CONF`.
   `katalog_lektora/<ścieżka katalogu źródła>/<nazwa>_lektor.<fmt>` zamiast obok
   dokumentu; podgląd `.md`, `?read` i ikona 🎧 w listingu je odnajdują.
 
+### Dwie instancje na Wykonawcy: Jarvis (:8790) i Sprawozdania (:8766)
+
+Od 19.11.2026 jeden kod (`/srv/anberfiles/kod`, wspólny venv), dwa pliki ustawień:
+`konfiguracja/jarvis.conf.przyklad` i `konfiguracja/sprawozdania.conf.przyklad`
+(jednostka `konfiguracja/anberfiles-sprawozdania.service.przyklad`, następca
+jednoplikowego `sprawozdania-server.py`; droga powrotu w nagłówku jednostki).
+
+- `[serwer] partner_nazwa`, `partner_adres` — przycisk **„⇄ <partner_nazwa>”** w pasku
+  listingu, podglądu (`?view=1`) i na ekranie logowania. Pusty `partner_adres` =
+  brak przycisku (konsola Anbernic bez zmian).
+- **Kontrakt trasy `GET /_z_partnera?p=<ścieżka względna>[&view=1]`** (instancja
+  docelowa rozwiązuje ścieżkę we WŁASNYM katalogu głównym, nic nie czyta z dysku
+  partnera): plik istnieje → `302` na plik (z `?view=1`, jeśli podano); katalog →
+  `302` na katalog; brak → `302` na najbliższy istniejący katalog nadrzędny
+  (w skrajnym razie `/`). Ścieżka bezwzględna, z `..`, `.`, `\`, dwukropkiem,
+  znakami sterującymi albo wychodząca dowiązaniem poza katalog główny → `400`.
+  Trasa podlega logowaniu instancji: przy formularzu bez sesji pojawia się ekran
+  logowania z `dalej=/_z_partnera?…`, po zalogowaniu powrót wyłącznie na ścieżkę
+  lokalną (`/…`, bez `//`, `/\`, schematu i hosta — inaczej `/`).
+- `[katalogi] katalog_docx` — silnik eksportu DOCX (`export_to_docx.py`,
+  `typografia.py`, `lint_styl.py`, białe listy `export_*.py`); pusty = `katalog_eksportu`.
+  `katalog_wyniku_docx` — wynik eksportu; pusty = `<projekt>/exports/` (jak dotąd).
+  Przy `tylko_odczyt = tak` przycisk „⬇ DOCX” działa tylko z ustawionym
+  `katalog_wyniku_docx` poza katalogiem głównym (serwer nie wystartuje, gdy leży
+  w nim): katalog główny pozostaje nietknięty.
+- `[serwer] po_wgraniu_polecenie` — program (ścieżka bezwzględna, bez argumentów
+  i powłoki) uruchamiany w tle po wgraniu plików do `projekty/<projekt>/exports/`
+  (Sprawozdania: `/usr/local/bin/lektor-music-sync.sh`).
+- `[katalogi] katalog_pdfjs` — pdf.js (pusty = `app/static/pdfjs` z repozytorium).
+- Moduły (domyślnie wyłączone): `podglad_pdfjs` (podgląd PDF/DOCX rysowany pdf.js,
+  pliki pod `/_pdfjs/`), `przenoszenie` (przeciągnięcie wiersza listingu na folder =
+  `POST ?move=<folder>`, bez nadpisywania; ↺ ↻ obrót obrazu `POST ?rotate=±90|180`,
+  oryginał do Kosza; tylko gdy zapis dozwolony).
+- Okno lektora dopasowuje się do `czytaj_tts.py` instancji: wybór silnika tylko,
+  gdy skrypt zna `--silnik`; wybór języka całego dokumentu, gdy zna `--lang`.
+
+**Model zaufania eksportera DOCX.** Obie instancje uruchamiają kanoniczny
+`/mnt/data/sprawozdania/EXPORT/export_to_docx.py` interpreterem serwera. Ten kod
+może zmieniać `anberbot` (agent Karola, właściciel katalogu EXPORT) — przyjęte jako
+zaufane (plan ujednolicenia v3, wybór A). Instancja Jarvis wykonuje go jako
+`anberfiles` w utwardzonej jednostce: bez zapisu poza katalogiem danych i katalogiem
+lektora, vault tylko do odczytu. Do rewizji przy zmianie modelu zaufania.
+
+**Rozjazd silników lektora.** `tools/czytaj_tts.py` w repozytorium (Piper lokalnie,
+`--silnik`) i `EXPORT/czytaj_tts.py` bota (edge, `--lang`) to dwa różne programy;
+każda instancja zachowuje swój `katalog_eksportu`. Scalenie: `DŁUG.md`.
+
+**Licencje dołączonych zależności.** pdf.js — Apache-2.0 (`app/static/pdfjs/LICENSE.txt`).
+Zależności eksportera (`requirements.in`, lista z `narzedzia/zaleznosci_eksportera.py`):
+latex2mathml, beautifulsoup4, fonttools, lxml — licencje MIT/BSD; cairosvg —
+LGPL-3.0, ładowana dynamicznie przez eksporter tylko do obrazów SVG (bez
+modyfikacji, osobny pakiet), nie wbudowana w kod AnberFiles.
+
 ### Logowanie (`[serwer] logowanie`)
 
 - `basic` (domyślne, konsola Anbernic) — okno HTTP Basic, hasło z `SERVER_PASS`.

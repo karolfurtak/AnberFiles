@@ -1,0 +1,60 @@
+# Jednostka systemd AnberFiles — instancja „Sprawozdania” (Wykonawca, port 8766).
+# Ten sam kod i venv co instancja Jarvis (/srv/anberfiles/kod, /srv/anberfiles/venv),
+# inne ustawienia. Zastępuje sprawozdania-server.service (stara jednostka i plik
+# /usr/local/bin/sprawozdania-server.py zostają jako droga powrotu).
+# Kopia robocza: /etc/systemd/system/anberfiles-sprawozdania.service, potem:
+#   sudo systemctl daemon-reload
+#   sudo systemctl disable --now sprawozdania-server && sudo systemctl enable --now anberfiles-sprawozdania
+# Powrót (jedno polecenie):
+#   sudo systemctl disable --now anberfiles-sprawozdania && sudo systemctl enable --now sprawozdania-server
+
+[Unit]
+Description=AnberFiles — serwer plików (instancja Sprawozdania, port 8766)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+Conflicts=sprawozdania-server.service
+
+[Service]
+Type=simple
+User=anberbot
+Group=anberbot
+Environment=ANBERFILES_CONF=/etc/anberfiles/sprawozdania.conf
+Environment=PYTHONUNBUFFERED=1
+# soffice (podgląd DOCX, druk) potrzebuje zapisywalnego katalogu domowego
+Environment=HOME=/srv/anberfiles/dane-sprawozdania
+# SERVER_USER, SERVER_PASS (i SERVER_PORT, SERVER_HOST) jak w starej usłudze
+EnvironmentFile=/etc/sprawozdania-server.env
+ExecStart=/srv/anberfiles/venv/bin/python /srv/anberfiles/kod/app/server.py
+WorkingDirectory=/srv/anberfiles/dane-sprawozdania
+Restart=on-failure
+RestartSec=5
+MemoryMax=768M
+Nice=10
+# Utwardzenie (plan v2 pkt 7): zapis tylko w katalogu głównym sprawozdań, kolejce
+# lektora i katalogu danych instancji; reszta systemu tylko do odczytu.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/mnt/data/sprawozdania /mnt/data/lektor_queue.json /srv/anberfiles/dane-sprawozdania
+UMask=0002
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+# C9: wywołania potrzebne bwrap do odcięcia sieci LibreOffice (jak w instancji Jarvis)
+SystemCallFilter=unshare pivot_root mount umount2 setns
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+PrivateDevices=yes
+RestrictNamespaces=user net mnt
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

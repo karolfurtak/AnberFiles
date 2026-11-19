@@ -12,3 +12,14 @@ python-docx
 Pillow
 edge-tts
 num2words
+# Eksporter DOCX (katalog_docx, kanoniczny EXPORT/export_to_docx.py + typografia.py
+# + lint_styl.py) i lektor bota (EXPORT/czytaj_tts.py) uruchamiane interpreterem
+# serwera — lista wyprowadzona skryptem narzedzia/zaleznosci_eksportera.py
+# (test: tests/test_zaleznosci_eksportera.py). Licencje: latex2mathml MIT,
+# beautifulsoup4 MIT, fonttools MIT, cairosvg LGPL-3.0 (ładowana dynamicznie,
+# tylko obrazy SVG; bez niej eksporter pomija SVG — patrz README).
+beautifulsoup4
+cairosvg
+fonttools
+latex2mathml
+lxml

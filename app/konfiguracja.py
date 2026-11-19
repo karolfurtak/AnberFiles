@@ -35,9 +35,14 @@ PLIK_HASLA_PODPOWIEDZ = '/etc/anberfiles/haslo.env'
 LOGOWANIE = ('basic', 'formularz')
 
 MODULY = ('podglad_docx', 'eksport_docx', 'lektor', 'lektor_opisy_ai',
-          'wylaczanie', 'druk', 'bateria', 'kadrowanie', 'przesluchania')
+          'wylaczanie', 'druk', 'bateria', 'kadrowanie', 'przesluchania',
+          'podglad_pdfjs', 'przenoszenie')
 # moduły WYŁĄCZONE, gdy plik ustawień o nich milczy (konsola Anbernic bez nich)
-MODULY_DOMYSLNIE_WYLACZONE = ('przesluchania',)
+#   podglad_pdfjs — podgląd PDF/DOCX rysowany lokalnym pdf.js (zamiast <iframe>),
+#   przenoszenie — przeciąganie wpisu do folderu i obrót obrazu (zapis w katalogu głównym)
+MODULY_DOMYSLNIE_WYLACZONE = ('przesluchania', 'podglad_pdfjs', 'przenoszenie')
+# pdf.js (Apache-2.0) dołączony do repozytorium — katalog_pdfjs domyślnie
+KATALOG_PDFJS_REPO = Path(__file__).resolve().parent / 'static' / 'pdfjs'
 
 KLUCZE = {
     'serwer': ('nazwa_instancji', 'host', 'port', 'uzytkownik_www',
@@ -47,12 +52,14 @@ KLUCZE = {
                'limit_druku_na_godzine', 'strona_startowa',
                'limit_odczytu_katalogu_s', 'wiek_nagran_dni',
                'lektor_auto_odswiezanie', 'puls_adres',
-               'lektor_godzina_nocna', 'lektor_nocne_okno_do'),
+               'lektor_godzina_nocna', 'lektor_nocne_okno_do',
+               'partner_nazwa', 'partner_adres', 'po_wgraniu_polecenie'),
     'katalogi': ('katalog_glowny', 'katalog_danych', 'rejestr_zdarzen',
                  'kolejka_lektora', 'bledy_lektora', 'bledy_druku',
                  'katalog_lektora', 'pamiec_podr_docx', 'katalog_zip_tmp',
                  'katalog_eksportu', 'favikona', 'kosz', 'dziennik_dostepu',
-                 'bez_drzewa', 'przesluchania_zakres', 'przesluchania_kandydaci'),
+                 'bez_drzewa', 'przesluchania_zakres', 'przesluchania_kandydaci',
+                 'katalog_docx', 'katalog_wyniku_docx', 'katalog_pdfjs'),
     'moduly': MODULY,
 }
 
@@ -131,6 +138,20 @@ class Konfiguracja:
     # i opcjonalny plik propozycji klasyfikacji (tabela Markdown)
     przesluchania_zakres: 'Path | None' = None
     przesluchania_kandydaci: 'Path | None' = None
+    # druga przeglądarka plików (przycisk „⇄ <partner_nazwa>”): adres http(s)
+    # instancji partnera; pusty = brak przycisku (konsola Anbernic)
+    partner_nazwa: str = ''
+    partner_adres: str = ''
+    # silnik eksportu DOCX (export_to_docx.py + typografia.py + export_*.py);
+    # None = katalog_eksportu (dotychczas jeden katalog dla lektora i DOCX)
+    katalog_docx: 'Path | None' = None
+    # gdzie zapisać wynik eksportu DOCX: None = <projekt>/exports/ (jak dotąd);
+    # przy tylko_odczyt obowiązkowo poza katalogiem głównym (katalog danych)
+    katalog_wyniku_docx: 'Path | None' = None
+    katalog_pdfjs: Path = KATALOG_PDFJS_REPO
+    # program uruchamiany (bez argumentów, bez powłoki) po wgraniu plików do
+    # projekty/<projekt>/exports/ — np. /usr/local/bin/lektor-music-sync.sh
+    po_wgraniu_polecenie: str = ''
 
     @property
     def katalog_auth(self) -> Path:
@@ -161,8 +182,19 @@ class Konfiguracja:
         return self.katalog_eksportu / 'lektor-ustawienia.conf'
 
     @property
+    def katalog_silnika_docx(self) -> Path:
+        return self.katalog_docx if self.katalog_docx is not None else self.katalog_eksportu
+
+    @property
     def skrypt_eksportu_docx(self) -> Path:
-        return self.katalog_eksportu / 'export_to_docx.py'
+        return self.katalog_silnika_docx / 'export_to_docx.py'
+
+    @property
+    def eksport_docx_dostepny(self) -> bool:
+        """Przycisk „⬇ DOCX” i POST ?docx=1: moduł włączony, a przy tylko_odczyt
+        tylko z katalogiem wyniku (zapis do katalogu danych, nie do katalogu głównego)."""
+        return self.modul('eksport_docx') and (
+            not self.tylko_odczyt or self.katalog_wyniku_docx is not None)
 
 
 def _bool(sekcja: str, klucz: str, tekst: str) -> bool:
@@ -308,6 +340,24 @@ def _adres_http(klucz: str, tekst: str) -> str:
     return t
 
 
+def _nazwa_partnera(tekst: str) -> str:
+    t = tekst.strip()
+    if len(t) > 40 or any(ord(c) < 32 for c in t):
+        raise BladKonfiguracji(f'[serwer] partner_nazwa = {tekst!r}: najwyżej 40 znaków, '
+                               'bez znaków sterujących')
+    return t
+
+
+def _polecenie(tekst: str) -> str:
+    """Ścieżka bezwzględna programu (bez argumentów i powłoki) albo pusto."""
+    t = tekst.strip()
+    if t and (not (t.startswith('/') or Path(t).is_absolute())
+              or re.search(r'[\s;&|`$<>]', t)):
+        raise BladKonfiguracji(f'[serwer] po_wgraniu_polecenie = {tekst!r}: wymagana '
+                               'ścieżka bezwzględna programu, bez argumentów i spacji')
+    return t
+
+
 def _czytaj_plik(sciezka: Path) -> dict:
     """Plik ustawień → {sekcja: {klucz: tekst}}; nieznana sekcja/klucz = błąd
     (literówka nie może po cichu zostawić wartości domyślnej)."""
@@ -419,6 +469,14 @@ def wczytaj(sciezka=None, env=None) -> Konfiguracja:
                               if k.get('przesluchania_zakres') else None),
         przesluchania_kandydaci=(Path(k['przesluchania_kandydaci'])
                                  if k.get('przesluchania_kandydaci') else None),
+        partner_nazwa=_nazwa_partnera(s.get('partner_nazwa', '')) or (
+            'partner' if s.get('partner_adres', '').strip() else ''),
+        partner_adres=_adres_http('partner_adres', s.get('partner_adres', '')).rstrip('/'),
+        po_wgraniu_polecenie=_polecenie(s.get('po_wgraniu_polecenie', '')),
+        katalog_docx=Path(k['katalog_docx']) if k.get('katalog_docx') else None,
+        katalog_wyniku_docx=(Path(k['katalog_wyniku_docx'])
+                             if k.get('katalog_wyniku_docx') else None),
+        katalog_pdfjs=sciezka_k('katalog_pdfjs', KATALOG_PDFJS_REPO),
     )
 
 
@@ -471,6 +529,16 @@ def sprawdz_przy_starcie(k: Konfiguracja) -> list:
         elif k.katalog_glowny.is_dir() and not _w_katalogu(z, k.katalog_glowny):
             bledy.append(f'przesluchania_zakres {z} leży poza katalog_glowny '
                          f'{k.katalog_glowny} — notatek nie dałoby się otworzyć.')
+    if k.katalog_wyniku_docx is not None and k.katalog_glowny.is_dir() \
+            and _w_katalogu(k.katalog_wyniku_docx, k.katalog_glowny):
+        bledy.append(f'katalog_wyniku_docx {k.katalog_wyniku_docx} leży w katalog_glowny '
+                     f'{k.katalog_glowny} — eksport DOCX ma pisać do katalogu danych, '
+                     'nie do treści udostępnianej.')
+    if k.modul('podglad_pdfjs'):
+        for plik in ('pdf.min.mjs', 'pdf.worker.min.mjs'):
+            if not (k.katalog_pdfjs / plik).is_file():
+                bledy.append(f'moduł podglad_pdfjs włączony, a w katalog_pdfjs '
+                             f'{k.katalog_pdfjs} brak {plik}.')
     if k.katalog_lektora is not None and k.katalog_glowny.is_dir() \
             and not _w_katalogu(k.katalog_lektora, k.katalog_glowny):
         bledy.append(f'katalog_lektora {k.katalog_lektora} leży poza '
@@ -485,4 +553,5 @@ def opis(k: Konfiguracja) -> str:
     return (f'instancja={k.nazwa_instancji} ustawienia={k.zrodlo} '
             f'katalog={k.katalog_glowny} logowanie={k.logowanie} '
             f'tylko_odczyt={"tak" if k.tylko_odczyt else "nie"} '
-            f'moduły_wyłączone={",".join(wyl) or "brak"}')
+            f'moduły_wyłączone={",".join(wyl) or "brak"}'
+            + (f' partner={k.partner_nazwa}@{k.partner_adres}' if k.partner_adres else ''))

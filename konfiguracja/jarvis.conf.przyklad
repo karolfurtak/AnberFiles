@@ -17,6 +17,12 @@ uzytkownik_www  = admin          ; login okna HTTP Basic (logowanie = basic); pr
 haslo_wymagane  = tak            ; przy logowanie = basic: pusty SERVER_PASS = serwer nie startuje
 logowanie       = formularz      ; basic = okno HTTP Basic (konsola) · formularz = strona logowania + zapamiętane urządzenie
 tylko_odczyt    = tak            ; wgrywanie, usuwanie, zmiana nazwy, nowy katalog → 403
+# Przycisk „⇄ <partner_nazwa>” (listing, podgląd, logowanie) prowadzi do drugiej
+# przeglądarki plików: <partner_adres>/_z_partnera?p=<ta sama ścieżka>; partner sam
+# sprawdza, czy plik u niego istnieje. Pusty partner_adres = brak przycisku.
+partner_nazwa   = Sprawozdania
+partner_adres   = http://wykonawca.local:8766   ; na Wykonawcy: adres Tailscale
+po_wgraniu_polecenie =          ; program po wgraniu do projekty/*/exports/ (tu: zapis wyłączony)
 # Ekran „Ustaw hasło" (logowanie = formularz, hasło nieustawione) przyjmuje hasło tylko
 # z jednorazowym tokenem startowym — adres z tokenem drukuje usługa do dziennika:
 #   sudo journalctl -u anberfiles -n 50 | grep token
@@ -83,6 +89,13 @@ katalog_zip_tmp  = /srv/anberfiles/dane/zip_tmp
 katalog_eksportu = /srv/anberfiles/eksport          ; czytaj_tts.py + lektor-ustawienia.conf
 favikona         = /srv/anberfiles/dane/favicon.ico
 kosz             = /srv/anberfiles/dane/kosz
+# Eksport DOCX: silnik = kanoniczny katalog EXPORT sprawozdań (export_to_docx.py,
+# typografia.py, białe listy export_*.py) — kod zapisywalny przez anberbot, przyjęty
+# jako zaufany (README: model zaufania eksportera). Wynik przy tylko_odczyt leci do
+# katalogu danych, nigdy do katalogu głównego.
+katalog_docx        = /mnt/data/sprawozdania/EXPORT
+katalog_wyniku_docx = /srv/anberfiles/dane/eksport-docx
+katalog_pdfjs       =           ; pusty = app/static/pdfjs z repozytorium
 # bez_drzewa: nazwy (po przecinku) katalogów PIERWSZEGO poziomu katalog_glowny, których poddrzewa
 # eksplorator (?explorer=1) nie rozwija — dla bardzo dużych lub zdalnych zasobów. Wpis katalogu
 # w drzewie zostaje, listing po kliknięciu działa normalnie. Puste = rozwijane wszystkie.
@@ -98,7 +111,7 @@ przesluchania_kandydaci =
 
 [moduly]
 podglad_docx    = tak
-eksport_docx    = nie
+eksport_docx    = tak            ; 19.11: „⬇ DOCX” także przy tylko_odczyt (wynik w katalogu danych)
 lektor          = tak
 lektor_opisy_ai = nie
 wylaczanie      = nie
@@ -106,3 +119,5 @@ druk            = tak
 bateria         = nie
 kadrowanie      = nie
 przesluchania   = tak            ; lista „Do przesłuchania” z decyzjami (Anbernic: domyślnie nie)
+podglad_pdfjs   = tak            ; podgląd PDF/DOCX lokalnym pdf.js (telefony nie pokazują PDF w ramce)
+przenoszenie    = nie            ; przeciąganie do folderu i obrót obrazu (tu: tylko odczyt)

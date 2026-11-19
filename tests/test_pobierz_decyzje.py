@@ -122,10 +122,12 @@ def atrapa():
 
 def _uruchom(adres, *arg, haslo=HASLO, limit_s=2):
     env = {k: v for k, v in os.environ.items() if not k.startswith('ANBERFILES_')}
+    env['PYTHONIOENCODING'] = 'utf-8'      # Windows: bez tego potok w cp1250 (T0)
     if haslo is not None:
         env['ANBERFILES_HASLO'] = haslo
     argv = [sys.executable, str(SKRYPT), '--adres', adres, '--limit-s', str(limit_s), *arg]
-    r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=limit_s + 10,
+    r = subprocess.run(argv, env=env, capture_output=True, text=True, encoding='utf-8',
+                       timeout=limit_s + 10,
                        stdin=subprocess.DEVNULL)
     return r, argv
 

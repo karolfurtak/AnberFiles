@@ -387,7 +387,7 @@ def zapisz_atomowo(plik: Path, tekst: str):
     plik = Path(plik)
     fd, tmp = tempfile.mkstemp(prefix=f'.{plik.name}.', suffix='.tmp', dir=plik.parent)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
             f.write(tekst)
             f.flush()
             os.fsync(f.fileno())

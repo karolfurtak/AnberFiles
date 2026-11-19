@@ -75,7 +75,8 @@ def test_tylko_odczyt_odrzuca_zapis(tmp_path, auth, kadrowanie):
         st['kadrowanie'] = (await cl.post('/vault/proj/obraz.png?crop', auth=auth,
                                           json={'x': 0, 'y': 0, 'w': 5, 'h': 5,
                                                 'mode': 'overwrite'})).status
-        st['eksport_docx'] = (await cl.post('/vault/proj/a.md?docx=1', auth=auth)).status
+        # eksport DOCX przy tylko_odczyt dozwolony od 19.11 (wynik w katalogu
+        # danych, katalog główny nietknięty) — test_ujednolicenie.py (T1–T3)
         return st
     st = uruchom(k, sc)
     assert st == {n: 403 for n in st}, st
@@ -104,7 +105,7 @@ def test_bez_tylko_odczytu_zapis_dziala(tmp_path):
 
 def test_interfejs_ukrywa_akcje_wylaczone(tmp_path, auth):
     _drzewo(tmp_path)
-    k = wczytaj(zbuduj_jarvis(tmp_path))
+    k = wczytaj(zbuduj_jarvis(tmp_path, eksport_docx='nie'))
 
     async def sc(cl):
         lst = await (await cl.get('/vault/proj/', auth=auth)).text()

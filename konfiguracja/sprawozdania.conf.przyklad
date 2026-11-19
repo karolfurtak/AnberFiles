@@ -1,0 +1,48 @@
+# Ustawienia instancji AnberFiles „Sprawozdania” (Wykonawca, Raspberry Pi 5, port 8766)
+# — następca jednoplikowego sprawozdania-server.py (19.11.2026: jedna baza kodu,
+# dwie instancje). Kopia robocza: /etc/anberfiles/sprawozdania.conf, jednostka
+# konfiguracja/anberfiles-sprawozdania.service.przyklad.
+# Hasło NIE w tym pliku: logowanie „basic”, SERVER_USER i SERVER_PASS ze zmiennych
+# (EnvironmentFile=/etc/sprawozdania-server.env, te same co w starej usłudze).
+# Priorytet: zmienna środowiska (SERVER_HOST, SERVER_PORT, SERVER_USER) > ten plik > domyślne.
+
+[serwer]
+nazwa_instancji = Sprawozdania
+host            = 0.0.0.0
+port            = 8766
+uzytkownik_www  = anbernic
+haslo_wymagane  = tak            ; pusty SERVER_PASS = serwer nie startuje
+logowanie       = basic          ; okno HTTP Basic, jak stara usługa (boty i linki działają bez zmian)
+tylko_odczyt    = nie            ; wgrywanie, kosz, zmiana nazwy dozwolone (jak dotąd)
+partner_nazwa   = Jarvis
+partner_adres   = http://wykonawca.local:8790   ; na Wykonawcy: adres Tailscale
+po_wgraniu_polecenie =          ; po wgraniu do projekty/*/exports/ (konsola: /usr/local/bin/lektor-music-sync.sh; na Wykonawcy brak programu — pomiar 19.11)
+prog_pamieci_mb = 400
+
+[katalogi]
+katalog_glowny   = /mnt/data/sprawozdania
+katalog_danych   = /srv/anberfiles/dane-sprawozdania
+rejestr_zdarzen  = /srv/anberfiles/dane-sprawozdania/anberfiles-events.log
+kolejka_lektora  = /mnt/data/lektor_queue.json            ; kolejka starej usługi (wznawia się)
+bledy_lektora    = /srv/anberfiles/dane-sprawozdania/lektor_errors.log
+bledy_druku      = /srv/anberfiles/dane-sprawozdania/print_errors.log
+pamiec_podr_docx = /srv/anberfiles/dane-sprawozdania/cache/docx-preview
+katalog_zip_tmp  = /srv/anberfiles/dane-sprawozdania/zip_tmp
+katalog_eksportu = /mnt/data/sprawozdania/EXPORT   ; lektor bota (czytaj_tts.py) + lektor-ustawienia.conf
+katalog_docx     = /mnt/data/sprawozdania/EXPORT   ; silnik DOCX; wynik w <projekt>/exports/ jak dotąd
+favikona         = /mnt/data/dev-skills/favicons/favicon.ico
+kosz             = /mnt/data/sprawozdania/.kosz      ; ten sam Kosz co stara usługa
+dziennik_dostepu = /srv/anberfiles/dane-sprawozdania/access.log
+
+[moduly]
+podglad_docx    = tak
+eksport_docx    = tak
+lektor          = tak
+lektor_opisy_ai = tak
+wylaczanie      = nie            ; to nie konsola — bez wyłączania urządzenia po kolejce
+druk            = tak
+bateria         = nie
+kadrowanie      = tak
+przesluchania   = nie
+podglad_pdfjs   = tak
+przenoszenie    = tak

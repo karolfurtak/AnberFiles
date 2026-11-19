@@ -52,6 +52,7 @@ CIASTECZKO = 'anberfiles_sesja'
 CIASTECZKO_FORMULARZA = 'anberfiles_formularz'   # wartość losowa do tokenu formularza
 POLE_FORMULARZA = 'formularz'                    # ukryte pole z tokenem formularza
 LINK_STARTOWY = ''      # przycisk „🏠 strona startowa” (HTML z server._link_startowy)
+LINK_PARTNERA = None     # funkcja → HTML przycisku „⇄ <partner>” (server._link_partnera)
 WAZNOSC_S = 10 * 365 * 24 * 3600          # „do odwołania" — 10 lat
 MIN_DLUGOSC_HASLA = 10
 LIMIT_PROB = 10                           # prób logowania na adres …
@@ -401,6 +402,14 @@ _STYL = ('body{font-family:system-ui,sans-serif;max-width:24rem;margin:12vh auto
          '.muted{color:#666;font-size:.9rem}')
 
 
+def _przyciski_naglowka() -> str:
+    """🏠 strona startowa i ⇄ partner (LINK_PARTNERA: funkcja serwera, bo adres
+    zależy od ścieżki żądania) nad formularzem."""
+    partner = LINK_PARTNERA() if LINK_PARTNERA is not None else ''
+    html = (LINK_STARTOWY or '') + partner
+    return f'<div>{html}</div>' if html else ''
+
+
 def _strona(tytul: str, tresc: str, status: int) -> web.Response:
     return web.Response(
         status=status, content_type='text/html', charset='utf-8',
@@ -408,7 +417,7 @@ def _strona(tytul: str, tresc: str, status: int) -> web.Response:
         text=('<!doctype html><meta charset=utf-8>'
               '<meta name="viewport" content="width=device-width,initial-scale=1">'
               f'<title>{_html.escape(tytul)}</title><style>{_STYL}</style>'
-              + (f'<div>{LINK_STARTOWY}</div>' if LINK_STARTOWY else '') + tresc))
+              + _przyciski_naglowka() + tresc))
 
 
 def _strona_logowania(instancja: str, dalej: str, blad: str = '', status: int = 401,

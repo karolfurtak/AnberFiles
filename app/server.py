@@ -32,6 +32,9 @@ import nagrania as _nagr
 import przesluchania as _prz
 import pozycje as _poz
 import odswiezanie as _odsw
+import pdfjs as _pdfjs
+import przenoszenie as _przen
+import contextvars
 
 try:
     import markdown as _markdown      # renderowany podgląd .md (opcjonalny)
@@ -91,9 +94,93 @@ def _link_kolejki() -> str:
             'setInterval(t,5000);})();</script>')
 
 
+# ścieżka bieżącego żądania (dla przycisku partnera): (ścieżka URL, czy ?view)
+_KONTEKST = contextvars.ContextVar('af_kontekst', default=('/', False))
+
+
+def _link_partnera() -> str:
+    """Przycisk „⇄ <partner_nazwa>” — ta sama ścieżka w drugiej przeglądarce
+    plików: <partner_adres>/_z_partnera?p=<ścieżka>[&view=1]. Partner sam
+    rozstrzyga, czy plik u niego istnieje (kontrakt w README). Pusty
+    partner_adres = brak przycisku (konsola Anbernic)."""
+    if KONF is None or not KONF.partner_adres:
+        return ''
+    sciezka, widok = _KONTEKST.get()
+    rel = sciezka.strip('/')
+    if rel.startswith('__anberfiles/') or rel == '_z_partnera':
+        rel = ''
+    url = f'{KONF.partner_adres}/_z_partnera?p={quote(rel, safe="/")}' + (
+        '&view=1' if widok else '')
+    return (f'<a class="af-partner" href="{_esc(url)}" target="_top" '
+            f'title="Ta sama ścieżka w przeglądarce {_esc(KONF.partner_nazwa)}" '
+            'style="display:inline-block;font:700 1.05rem/1.2 system-ui,sans-serif;'
+            'padding:.4em .85em;margin:.15em .3em;border-radius:8px;border:0;'
+            'background:#6b3fa0;color:#fff;text-decoration:none;white-space:nowrap">'
+            f'⇄ {_esc(KONF.partner_nazwa)}</a>')
+
+
 def _przyciski() -> str:
-    """Przyciski nagłówka każdego widoku: 🏠 strona startowa + 🔊 kolejka lektora."""
-    return _link_startowy() + _link_kolejki()
+    """Przyciski nagłówka każdego widoku: 🏠 strona startowa + 🔊 kolejka lektora
+    + ⇄ druga przeglądarka plików."""
+    return _link_startowy() + _link_kolejki() + _link_partnera()
+
+
+@web.middleware
+async def kontekst_zadania(request, handler):
+    """Zapamiętuje ścieżkę żądania dla przycisku partnera (także na ekranie
+    logowania, który powstaje przed obsługą żądania)."""
+    _KONTEKST.set((request.path, 'view' in request.query))
+    return await handler(request)
+
+
+def _bledna_sciezka_partnera(p: str) -> bool:
+    """Ścieżka z ?p= trasy /_z_partnera: tylko względna, bez „..”, „\\”,
+    znaków sterujących i dwukropka (litera dysku, schemat)."""
+    if len(p) > 4096 or p.startswith('/') or '\\' in p or ':' in p:
+        return True
+    if any(ord(c) < 32 or ord(c) == 127 for c in p):
+        return True
+    return any(cz in ('..', '.') for cz in p.split('/'))
+
+
+async def z_partnera(request):
+    """GET /_z_partnera?p=<ścieżka względna>[&view=1] — wejście z przycisku
+    „⇄” drugiej instancji. Plik istnieje → 302 na plik (z ?view=1); katalog →
+    302 na katalog; brak → 302 na najbliższy istniejący katalog nadrzędny
+    (w skrajnym razie katalog główny). Ścieżka bezwzględna, z „..”, znakami
+    sterującymi albo wychodząca dowiązaniem poza katalog główny → 400."""
+    p = request.query.get('p', '')
+    if _bledna_sciezka_partnera(p):
+        return web.Response(status=400, text='Zła ścieżka przejścia z partnera.')
+    czesci = [c for c in p.split('/') if c]
+    while True:
+        rel = '/'.join(czesci)
+        try:
+            cel = (ROOT / rel).resolve() if rel else ROOT
+        except (OSError, ValueError):
+            return web.Response(status=400, text='Zła ścieżka przejścia z partnera.')
+        if cel != ROOT and ROOT not in cel.parents:
+            return web.Response(status=400, text='Ścieżka wychodzi poza katalog główny.')
+        ukryta = any(c.startswith('.') for c in czesci)
+        if not ukryta and rel and _jest_plikiem_bezpiecznie(cel):
+            loc = '/' + quote(rel) + ('?view=1' if 'view' in request.query else '')
+            break
+        if not ukryta and (not rel or _jest_katalogiem_bezpiecznie(cel)):
+            loc = '/' + (quote(rel) + '/' if rel else '')
+            break
+        czesci.pop()
+    raise web.HTTPFound(location=loc)
+
+
+async def pdfjs_plik(request):
+    """GET /_pdfjs/<plik> — biblioteka pdf.js z katalog_pdfjs (biała lista)."""
+    if not KONF.modul('podglad_pdfjs'):
+        return web.Response(status=404, text='Moduł podglad_pdfjs wyłączony.')
+    w = _pdfjs.plik(KONF.katalog_pdfjs, request.match_info.get('nazwa', ''))
+    if w is None:
+        return web.Response(status=404, text='Brak pliku pdf.js')
+    return web.FileResponse(w[0], headers={'Content-Type': w[1],
+                                           'Cache-Control': 'public, max-age=86400'})
 
 
 def _json_do_script(obj) -> str:
@@ -223,7 +310,7 @@ def _jest_plikiem_bezpiecznie(p) -> bool:
 # imporcie: domyślne Anbernica; main() i testy podają właściwe).
 KONF = None
 ROOT = PORT = HOST = USER = PASSW = None
-EVENT_LOG = DOCX_CACHE = EXPORT_DIR = FAVICON_ICO_PATH = None
+EVENT_LOG = DOCX_CACHE = EXPORT_DIR = DOCX_DIR = FAVICON_ICO_PATH = None
 CZYTAJ_TTS = LEKTOR_CONF = LEKTOR_QFILE = None
 # logowanie formularzem: moduł app/logowanie.py i limit prób (utworz_aplikacje)
 _LOGOWANIE = _BRAMKA = None
@@ -232,13 +319,14 @@ _LOGOWANIE = _BRAMKA = None
 def zastosuj_konfiguracje(k):
     """Przypisuje stałe modułu z ustawień instancji (jedno źródło prawdy)."""
     global KONF, ROOT, PORT, HOST, USER, PASSW, EVENT_LOG, DOCX_CACHE
-    global EXPORT_DIR, FAVICON_ICO_PATH, CZYTAJ_TTS, LEKTOR_CONF, LEKTOR_QFILE
+    global EXPORT_DIR, DOCX_DIR, FAVICON_ICO_PATH, CZYTAJ_TTS, LEKTOR_CONF, LEKTOR_QFILE
     KONF = k
     ROOT = Path(k.katalog_glowny).resolve()
     PORT, HOST, USER, PASSW = k.port, k.host, k.uzytkownik_www, k.haslo
     EVENT_LOG = k.rejestr_zdarzen
     DOCX_CACHE = k.pamiec_podr_docx
     EXPORT_DIR = k.katalog_eksportu
+    DOCX_DIR = k.katalog_silnika_docx
     FAVICON_ICO_PATH = k.favikona
     CZYTAJ_TTS = str(k.czytaj_tts)
     LEKTOR_CONF = str(k.lektor_conf)
@@ -380,6 +468,31 @@ AUDIO_MIME = {'.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.wav': 'audio/wav',
 LEKTOR_AUDIO_EXT = _nagr.AUDIO_EXT
 LEKTOR_ZRODLA = ('.md', '.docx', '.txt')        # dokumenty, które lektor czyta
 LEKTOR_SILNIKI = ('edge', 'piper')              # silniki mowy czytaj_tts.py
+# języki bazowe (--lang) w oknie lektora — tylko gdy czytaj_tts.py instancji
+# zna --lang (silnik bota w EXPORT); '' = wg ustawień (PL + wstawki obce)
+LEKTOR_JEZYKI = ('en', 'de', 'it', 'fr', 'es', 'pt', 'nl', 'sv', 'da', 'fi',
+                 'cs', 'ru', 'ja', 'ko', 'zh')
+_LEKTOR_OPCJE = {'klucz': None, 'opcje': frozenset()}
+
+
+def _lektor_opcje() -> frozenset:
+    """Opcje wiersza poleceń, które zna czytaj_tts.py tej instancji
+    ('--lang', '--silnik', '--opisy') — odczyt pliku, pamięć wg czasu zmiany.
+    Dwa silniki lektora (repo i bot) różnią się opcjami (DŁUG.md)."""
+    try:
+        st = os.stat(CZYTAJ_TTS)
+        klucz = (CZYTAJ_TTS, st.st_mtime_ns, st.st_size)
+    except (OSError, TypeError):
+        return frozenset()
+    if _LEKTOR_OPCJE['klucz'] != klucz:
+        try:
+            tekst = Path(CZYTAJ_TTS).read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            return frozenset()
+        _LEKTOR_OPCJE.update(klucz=klucz, opcje=frozenset(
+            o for o in ('--lang', '--silnik', '--opisy')
+            if re.search(r"add_argument\(\s*['\"]" + o + r"['\"]", tekst)))
+    return _LEKTOR_OPCJE['opcje']
 LEKTOR_UWAGA_EDGE = 'Silnik edge: tekst opuszcza urządzenie (usługa Microsoft).'
 
 
@@ -1083,7 +1196,7 @@ def _eksportery() -> list:
     """Biała lista: skrypty export_*.py leżące wprost w katalogu eksportu
     (zwykłe pliki, nie dowiązania) — katalog instancji, nie treść projektu."""
     try:
-        return sorted(p.name for p in EXPORT_DIR.glob('export_*.py')
+        return sorted(p.name for p in DOCX_DIR.glob('export_*.py')
                       if p.is_file() and not p.is_symlink())
     except OSError:
         return []
@@ -1098,7 +1211,7 @@ def _skrypt_eksportu(nazwa: str):
     dozwolone = _eksportery()
     for plik in (f'{stem}.py', f'export_{stem}.py'):
         if plik in dozwolone:
-            return EXPORT_DIR / plik
+            return DOCX_DIR / plik
     return None
 
 
@@ -1106,11 +1219,12 @@ async def _export_md_docx(target: Path):
     """Eksport .md → .docx silnikiem EXPORT/export_to_docx.py (obrazy + równania
     Word) — ten sam skrypt i argumenty co bot. Wynik ląduje w exports/ i jest
     serwowany do pobrania."""
-    script = EXPORT_DIR / 'export_to_docx.py'
+    script = DOCX_DIR / 'export_to_docx.py'
     if not script.exists():
-        return web.Response(status=500, text='Brak EXPORT/export_to_docx.py')
+        return web.Response(status=500, text=f'Brak export_to_docx.py w katalogu '
+                                             f'silnika DOCX ({DOCX_DIR})')
     proj = target.parent.parent          # processed/<md> → katalog projektu
-    cwd = EXPORT_DIR
+    cwd = DOCX_DIR
     # Wybór SKRYPTU eksportu — NAZWA, nigdy ścieżka (B5: skrypt z katalogu
     # projektu = wykonanie kodu z treści vaulta/sprawozdań):
     #   1) override per-dokument: <!-- eksporter: X --> w nagłówku .md,
@@ -1139,15 +1253,8 @@ async def _export_md_docx(target: Path):
                 'Dyrektywa wybiera NAZWĘ skryptu export_<nazwa>.py z katalogu eksportu '
                 f'({", ".join(_eksportery()) or "brak"}); skrypty z katalogu projektu '
                 'nie są uruchamiane.')
-    base_dir = target.parent             # do ścieżek obrazów; input/raw mają pierwszeństwo
-    for cand in (proj / 'input', proj / 'raw'):
-        try:
-            if cand.is_dir() and any(cand.iterdir()):
-                base_dir = cand
-                break
-        except OSError:
-            pass
-    out_dir = proj / 'exports'
+    base_dir = _katalog_obrazow_docx(target, proj)
+    out_dir = _katalog_wyniku_docx(target, proj)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_docx = out_dir / (target.stem + '.docx')
     async with _DOCX_EXPORT_LOCK:
@@ -1169,6 +1276,35 @@ async def _export_md_docx(target: Path):
                         'wordprocessingml.document',
         'Content-Disposition': "attachment; filename*=UTF-8''" + quote(out_docx.name),
         'Cache-Control': 'no-cache'})
+
+
+def _katalog_obrazow_docx(target: Path, proj: Path) -> Path:
+    """--base-dir eksportera (ścieżki obrazów): input/zalaczniki albo raw/zalaczniki
+    (układ sprawozdań z załącznikami), potem niepuste input/ albo raw/, inaczej
+    katalog dokumentu."""
+    for cand in (proj / 'input', proj / 'raw'):
+        try:
+            if (cand / 'zalaczniki').is_dir():
+                return cand
+        except OSError:
+            pass
+    for cand in (proj / 'input', proj / 'raw'):
+        try:
+            if cand.is_dir() and any(cand.iterdir()):
+                return cand
+        except OSError:
+            pass
+    return target.parent
+
+
+def _katalog_wyniku_docx(target: Path, proj: Path) -> Path:
+    """Gdzie zapisać DOCX: <projekt>/exports/ (domyślnie) albo
+    katalog_wyniku_docx/<ścieżka katalogu dokumentu> — instancja tylko do
+    odczytu nie pisze do katalogu głównego."""
+    if KONF.katalog_wyniku_docx is None:
+        return proj / 'exports'
+    rel = target.parent.resolve().relative_to(ROOT)
+    return Path(KONF.katalog_wyniku_docx) / rel
 
 
 MD_STYLE = (
@@ -1459,7 +1595,7 @@ def render_md_page(target: Path) -> str:
         f'<a href="{q}?dl=1">⬇ pobierz</a>'
         + (f'<a href="{q}?docx=1" id="docxbtn" title="Eksport do Word (.docx) — '
            'obrazy + równania">⬇ DOCX</a>'
-           if KONF.modul('eksport_docx') and not KONF.tylko_odczyt else '')
+           if KONF.eksport_docx_dostepny else '')
         + (f'<a href="#" id="prn" data-n="{q}">🖨 drukuj</a>'
            if KONF.modul('druk') else '')
         + _lektor_przycisk(target, aud)
@@ -1692,7 +1828,13 @@ LEKTOR_WYBOR_JS = (
     '["piper","Piper — lokalnie, bez internetu"],'
     '["edge","Edge — głosy online Microsoftu (internet)"]];'
     'const radios=mkradios(opts,"lfmt"),dradios=mkradios(dopts,"lopis"),'
-    'sradios=mkradios(sopts,"lsil");'
+    'sradios=window._LEK_BEZ_SILNIKA?"":mkradios(sopts,"lsil");'
+    'let langsel="";if(window._LEK_JEZYKI){langsel=\'<div style="color:#556;'
+    'font-size:.9em;margin:.8em 0 .3em;border-top:1px solid #e4e8ee;padding-top:.7em">'
+    '🌐 Język całego dokumentu:</div><select id="llang" style="width:100%;'
+    'padding:.45em"><option value="">⚙ wg ustawień (PL + wstawki obce)</option>\';'
+    'for(const v of window._LEK_JEZYKI)langsel+=\'<option value="\'+v+\'">\'+v+\'</option>\';'
+    'langsel+="</select>";}'
     'ov.innerHTML=\'<div style="background:#fff;border-radius:10px;'
     'padding:1.1em 1.4em;max-width:92vw;min-width:300px;'
     'box-shadow:0 8px 30px rgba(0,0,0,.35)">'
@@ -1710,7 +1852,7 @@ LEKTOR_WYBOR_JS = (
     '🖼 Opisy ilustracji (model wizyjny):</div>\'+dradios)+'
     '\'<div style="color:#556;font-size:.9em;margin:.8em 0 .3em;'
     'border-top:1px solid #e4e8ee;padding-top:.7em">'
-    '🗣 Głos (silnik mowy):</div>\'+sradios+'
+    '🗣 Głos (silnik mowy):</div>\'+sradios+langsel+'
     '\'<div style="display:flex;gap:.6em;margin-top:1em;'
     'justify-content:flex-end">'
     '<button data-a="x">Anuluj</button>'
@@ -1723,8 +1865,10 @@ LEKTOR_WYBOR_JS = (
     'b.onclick=()=>{const v=ov.querySelector("input[name=lfmt]:checked");'
     'const d=ov.querySelector("input[name=lopis]:checked");'
     'const sl=ov.querySelector("input[name=lsil]:checked");'
+    'const lg=ov.querySelector("#llang");'
     'ov.remove();res(b.dataset.a==="ok"'
-    '?{fmt:(v?v.value:""),opisy:(d?d.value:""),silnik:(sl?sl.value:"")}:null);};});'
+    '?{fmt:(v?v.value:""),opisy:(d?d.value:""),silnik:(sl?sl.value:""),'
+    'lang:(lg?lg.value:"")}:null);};});'
     # napis „tekst opuszcza urządzenie": wybrany edge → zawsze; Piper → brak;
     # wg ustawień → window._LEK_UWAGA (z lektor-ustawienia.conf, B8)
     'function lsw(){const sl=ov.querySelector("input[name=lsil]:checked");'
@@ -1752,7 +1896,8 @@ DEL_JS = (
     'a.textContent="⏳";'
     'try{'
     'let u=a.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
-    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
+    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"")'
+    '+(fm.lang?"&lang="+fm.lang:"");'
     'let r=await afFetch(u,{method:"POST"});'
     'let j=await r.json().catch(()=>({}));'
     'if(j.status==="busy"){'
@@ -1833,7 +1978,8 @@ LEKTOR_PODGLAD_JS = (
     'const fm=await pickFmt(decodeURIComponent(b.dataset.n));if(fm===null)return;'
     'b.dataset.busy="1";b.textContent="⏳";'
     'try{const u=b.dataset.n+"?lektor=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
-    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
+    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"")'
+    '+(fm.lang?"&lang="+fm.lang:"");'
     'let r=await afFetch(u,{method:"POST"});let j=await r.json().catch(()=>({}));'
     'if(j.status==="busy"){'
     'if(!confirm("Lektor jest teraz zajęty — czyta inny dokument."'
@@ -3269,7 +3415,7 @@ async def serve(request):
             FAVICON_LINK,
             f'<title>{_esc(rel_url)}</title>',
             f'<style>{STYLE}</style>',
-            (f'<div>{_przyciski()}</div>' if _link_startowy() else ''),
+            (f'<div>{_przyciski()}</div>' if _przyciski() else ''),
             f'<h2>{breadcrumb}</h2>',
             f'<p class="muted">{n} pozycji · kliknij nagłówek aby sortować · '
             f'⟳ auto-odświeżanie'
@@ -3298,6 +3444,8 @@ async def serve(request):
             LEKTOR_BAR_JS if lektor_on else '',
             MKDIR_JS if zapis else '',
             COPYCOL_JS,
+            ('<script>' + JS_ZAPIS + '</script>' + _przen.JS_LISTINGU
+             if zapis and KONF.modul('przenoszenie') else ''),
         ]
         return web.Response(text='\n'.join(html), content_type='text/html')
 
@@ -3359,6 +3507,7 @@ def _lektor_save_queue():
             'shutdown': _LEKTOR_SHUTDOWN,
             'jobs': [{'src': j['src'], 'out': j['out'], 'fmt': j['fmt'],
                       'opisy': j.get('opisy', ''), 'silnik': j.get('silnik', ''),
+                      'lang': j.get('lang', ''),
                       'plik': j.get('plik', j['src']), 'auto': bool(j.get('auto')),
                       'do': j.get('do')}
                      for j in _LEKTOR_QUEUE if not j['cancelled']]},
@@ -3391,11 +3540,12 @@ async def _lektor_restore(app):
             continue   # już generowane przez osierocony/zewnętrzny proces
         _lektor_new_job(it['src'], Path(it['out']), it['fmt'],
                         it.get('opisy', ''), it.get('silnik', ''), it.get('plik'),
-                        auto=bool(it.get('auto')), do=it.get('do'))
+                        auto=bool(it.get('auto')), do=it.get('do'),
+                        lang=it.get('lang', ''))
 
 
 def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None, auto=False,
-                    do=None) -> dict:
+                    do=None, lang='') -> dict:
     """Rejestracja zadania + start workera (wspólne dla 🔊 i „przejdź
     do następnego" przy pauzie). auto=True: odświeżenie po zmianie dokumentu
     (ustępuje zleconym ręcznie, czeka na koniec biegu Pulsa). do: znacznik
@@ -3407,6 +3557,7 @@ def _lektor_new_job(src, out, fmt, opisy='', silnik='', plik=None, auto=False,
     import time as _t
     job = {'id': _LEKTOR_SEQ, 'out': str(out), 'src': str(src), 'fmt': fmt,
            'opisy': opisy, 'silnik': silnik, 'state': 'queued', 'cancelled': False,
+           'lang': lang if lang in LEKTOR_JEZYKI else '',
            'proc': None, 'started': _t.time(), 'plik': str(plik or src),
            'auto': bool(auto)}
     if do:
@@ -3851,10 +4002,13 @@ async def _lektor_run(job: dict):
             errlog.write(f'\n=== {Path(job["out"]).name} ===\n'.encode())
             cmd = [sys.executable, CZYTAJ_TTS, job['src'], '-o', job['out'],
                    '--format', job['fmt']]
-            if job.get('opisy') in ('tak', 'nie'):
+            opcje = _lektor_opcje()
+            if job.get('opisy') in ('tak', 'nie') and '--opisy' in opcje:
                 cmd += ['--opisy', job['opisy']]
-            if job.get('silnik') in LEKTOR_SILNIKI:      # brak = wg ustawień lektora
-                cmd += ['--silnik', job['silnik']]
+            if job.get('silnik') in LEKTOR_SILNIKI and '--silnik' in opcje:
+                cmd += ['--silnik', job['silnik']]      # brak = wg ustawień lektora
+            if job.get('lang') in LEKTOR_JEZYKI and '--lang' in opcje:
+                cmd += ['--lang', job['lang']]
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -4189,9 +4343,18 @@ def _lektor_uwaga_silnika() -> str:
 
 
 def _lektor_uwaga_js() -> str:
+    """Ustawienia okna lektora dla strony: napis o silniku edge, a dla
+    czytaj_tts.py bez --silnik (silnik bota) — bez wyboru silnika; z --lang —
+    wybór języka całego dokumentu."""
     import json
-    u = _lektor_uwaga_silnika()
-    return f'<script>window._LEK_UWAGA={json.dumps(u)};</script>' if u else ''
+    opcje = _lektor_opcje()
+    u = _lektor_uwaga_silnika() if '--silnik' in opcje else ''
+    js = f'window._LEK_UWAGA={json.dumps(u)};' if u else ''
+    if '--silnik' not in opcje:
+        js += 'window._LEK_BEZ_SILNIKA=true;'
+    if '--lang' in opcje:
+        js += f'window._LEK_JEZYKI={json.dumps(list(LEKTOR_JEZYKI))};'
+    return f'<script>{js}</script>' if js else ''
 
 
 def _lektor_silnik() -> str:
@@ -4476,7 +4639,10 @@ async def lektor_item(request):
     silnik = request.query.get('silnik', '')
     if silnik not in LEKTOR_SILNIKI:
         silnik = ''
-    job = _lektor_new_job(src, out, fmt, opisy, silnik, plik=target)
+    lang = request.query.get('lang', '').strip().lower()
+    if lang not in LEKTOR_JEZYKI or '--lang' not in _lektor_opcje():
+        lang = ''
+    job = _lektor_new_job(src, out, fmt, opisy, silnik, plik=target, lang=lang)
     if request.query.get('teraz') == '1':
         job['teraz'] = True
     return web.json_response(
@@ -4485,10 +4651,11 @@ async def lektor_item(request):
 
 
 async def eksport_docx_item(request):
-    """POST ?docx=1 na pliku .md = eksport do .docx (zapis w exports/)."""
-    odm = _odmowa_zapisu()
-    if odm is None:
-        odm = _modul_wylaczony('eksport_docx')
+    """POST ?docx=1 na pliku .md = eksport do .docx (zapis w exports/ albo,
+    przy ustawionym katalog_wyniku_docx, w katalogu danych)."""
+    odm = _modul_wylaczony('eksport_docx')
+    if odm is None and not KONF.eksport_docx_dostepny:
+        odm = _odmowa_zapisu()
     if odm is not None:
         return odm
     raw = request.match_info.get('path', '').strip('/')
@@ -4501,6 +4668,55 @@ async def eksport_docx_item(request):
     if not target.is_file() or target.suffix.lower() != '.md':
         return web.Response(status=400, text='Eksport DOCX: tylko pliki .md')
     return await _export_md_docx(target)
+
+
+async def przenoszenie_item(request):
+    """POST ?move=<folder> (przeniesienie) albo ?rotate=<±90|180>[&mode=]
+    (obrót obrazu) — moduł „przenoszenie”, tylko gdy zapis dozwolony."""
+    odm = _odmowa_zapisu()
+    if odm is None:
+        odm = _modul_wylaczony('przenoszenie')
+    if odm is not None:
+        return odm
+    raw = request.match_info.get('path', '')
+    try:
+        if 'move' in request.query:
+            wynik = await asyncio.get_running_loop().run_in_executor(
+                None, _przen.przenies, ROOT, raw, request.query.get('move', ''))
+            if not wynik.get('noop'):
+                _evlog('move', wynik.pop('opis'))
+        else:
+            wynik = await asyncio.get_running_loop().run_in_executor(
+                None, _przen.obroc, ROOT, KONF.kosz, raw, request.query.get('rotate', ''),
+                request.query.get('mode', 'overwrite'), IMG_EXT)
+            _evlog('rotate', wynik.pop('opis'))
+    except _przen.Blad as e:
+        return web.json_response({'error': e.tekst}, status=e.status)
+    except OSError as e:
+        return web.json_response({'error': str(e)}, status=500)
+    return web.json_response(wynik)
+
+
+def _po_wgraniu(target: Path, zapisane) -> None:
+    """Polecenie po wgraniu (ustawienie po_wgraniu_polecenie) — tylko dla
+    projekty/<projekt>/exports/ (synchronizacja nagrań lektora); w tle,
+    bez powłoki i argumentów."""
+    cmd = KONF.po_wgraniu_polecenie
+    if not cmd or not zapisane:
+        return
+    try:
+        czesci = target.resolve().relative_to(ROOT).parts
+    except ValueError:
+        return
+    if 'exports' not in czesci or 'projekty' not in czesci:
+        return
+    import subprocess
+    try:
+        subprocess.Popen([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        _evlog('upload', f'po wgraniu: uruchomiono {cmd}')
+    except OSError as e:
+        _evlog('upload', f'po wgraniu: {cmd} nie ruszył ({e})', level='warn')
 
 
 async def mkdir_item(request):
@@ -4593,7 +4809,8 @@ async def lektor_pause(request):
             except ProcessLookupError:
                 pass
         nj = _lektor_new_job(job['src'], Path(job['out']), job['fmt'],
-                             job.get('opisy', ''), job.get('silnik', ''))
+                             job.get('opisy', ''), job.get('silnik', ''),
+                             job.get('plik'), lang=job.get('lang', ''))
         return web.json_response({'skipped': jid, 'requeued_as': nj['id']})
     # hold
     if job.get('proc') is not None and job['state'] == 'running':
@@ -4819,6 +5036,8 @@ async def upload(request):
         return await crop_item(request)
     if 'docx' in request.query:
         return await eksport_docx_item(request)
+    if 'rotate' in request.query or 'move' in request.query:
+        return await przenoszenie_item(request)
     if any(k in request.query for k in ('lektorqshutdown', 'lektorqpause',
                                         'lektorqresume', 'lektorqdel')):
         odm = _modul_wylaczony('lektor')
@@ -4924,6 +5143,7 @@ async def upload(request):
         saved.append(relname)
     _evlog('upload', f'{target.relative_to(ROOT)} <- {len(saved)} nowych'
            + (f', {skipped} pominiętych (już są)' if skipped else ''))
+    _po_wgraniu(target, saved)
     return web.json_response({'saved': saved, 'skipped': skipped})
 
 
@@ -5590,7 +5810,8 @@ PRZ_LEKTOR_JS = (
     'ev.preventDefault();const fm=await pickFmt(b.dataset.n);if(fm===null)return;'
     'const el=b.closest(".lek");b.disabled=true;'
     'const u=b.dataset.u+"?lektor=1&queue=1"+(fm.fmt?"&fmt="+fm.fmt:"")'
-    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"");'
+    '+(fm.opisy?"&opisy="+fm.opisy:"")+(fm.silnik?"&silnik="+fm.silnik:"")'
+    '+(fm.lang?"&lang="+fm.lang:"");'
     'try{const r=await afFetch(u,{method:"POST"});const j=await r.json().catch(()=>({}));'
     'if((r.status===202||j.status==="duplikat")&&j.id!=null){el.dataset.job=j.id;'
     'el.className="lek trwa";b.remove();stan(el,"⏳ w kolejce",null);petla();}'
@@ -6030,6 +6251,45 @@ async def sluchaj_get(request, target: Path):
 
 
 
+def _strona_pdfjs(target: Path, etykieta: str, komunikat: str) -> str:
+    """Podgląd PDF/DOCX rysowany pdf.js (moduł podglad_pdfjs): pasek jak
+    w podglądzie DOCX (folder, przyciski, lektor, pobierz) + strony na canvas."""
+    q = quote(target.name)
+    mt = target.stat().st_mtime
+    aud = _lektor_audio_for(target, exports=True)
+    cue = _lektor_cues_for(target, aud)
+    audio_html = ('<audio id="lek" controls preload="metadata" '
+                  f'src="{_url_abs(aud)}" title="{_esc(aud.name)}"></audio>'
+                  if aud is not None else '')
+    lekt = _lektor_przycisk(target, aud) if target.suffix.lower() != '.pdf' else ''
+    return (
+        '<!doctype html><meta charset=utf-8>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{_esc(target.name)}</title>'
+        '<style>body{margin:0;height:100vh;display:flex;flex-direction:column}'
+        '.bar{display:flex;gap:.6em;align-items:center;padding:.4em .9em;flex-wrap:wrap;'
+        'background:#26292f;color:#ddd;font-family:system-ui,sans-serif;font-size:.9em}'
+        '.bar a{color:#7ab7ff;text-decoration:none;border:1px solid '
+        '#3a3f47;border-radius:5px;padding:.2em .6em}'
+        '#lek{width:100%;background:#26292f;display:block}'
+        '.pvw{flex:1;position:relative;background:#2a2d33}' + _pdfjs.STYL +
+        '#cvt{position:absolute;inset:0;display:flex;align-items:center;'
+        'justify-content:center;color:#cfd6df;font-family:system-ui,'
+        'sans-serif;text-align:center;padding:1em;font-size:1.05em}'
+        '#cvt.hide{display:none}</style>'
+        f'<div class="bar"><a href="./">📁 folder</a>{_przyciski()}'
+        f'<span style="word-break:break-all">{_esc(target.name)}</span>'
+        '<span id="st" style="color:#8a93a0"></span>'
+        + (f'<a href="{q}?read=1" style="color:#6fce8f;'
+           'border-color:#2f6b46">📖 śledź tekst</a>' if cue
+           else ('<span style="color:#6fce8f">🔊 lektor</span>' if aud else ''))
+        + lekt
+        + f'<a href="{q}?dl=1" style="margin-left:auto">⬇ {etykieta}</a></div>'
+        + audio_html
+        + '<div class="pvw">' + _pdfjs.obszar('⏳ ' + komunikat) + '</div>'
+        + _pdfjs.skrypt(_json_do_script(q), _json_do_script(q + '?pdf=1'), mt))
+
+
 async def _serve_file(request, target):
     if 'dl' in request.query:
         return web.FileResponse(target, headers={
@@ -6066,6 +6326,15 @@ async def _serve_file(request, target):
         odm = _modul_wylaczony('podglad_docx')
         if odm is not None:
             return odm
+    if target.suffix.lower() == '.pdf' and 'pdf' in request.query:
+        return web.FileResponse(target, headers={
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': f"inline; filename*=UTF-8''{quote(target.name)}",
+            'Cache-Control': 'no-cache'})
+    if target.suffix.lower() == '.pdf' and 'view' in request.query \
+            and KONF.modul('podglad_pdfjs'):
+        return web.Response(text=_strona_pdfjs(target, 'PDF', 'Wczytuję PDF…'),
+                            content_type='text/html')
     # surowy PDF z konwersji (źródło dla <embed> w stronie podglądu)
     if 'pdf' in request.query and target.suffix.lower() in ('.docx', '.doc'):
         pdf = await docx_to_pdf(target)
@@ -6088,6 +6357,12 @@ async def _serve_file(request, target):
         return web.Response(status=404,
                             text='Brak read-along (potrzebny audio + cues)')
 
+    if 'view' in request.query and target.suffix.lower() in ('.docx', '.doc') \
+            and KONF.modul('podglad_pdfjs'):
+        return web.Response(text=_strona_pdfjs(
+            target, 'DOCX', 'Konwertuję dokument do PDF…<br><span style="opacity:.7;'
+            'font-size:.85em">pierwsze otwarcie ~10–30 s na tym sprzęcie '
+            '(potem natychmiast)</span>'), content_type='text/html')
     if 'view' in request.query and target.suffix.lower() in ('.docx', '.doc'):
         # strona-opakowanie: PDF w <embed> + poll mtime DOCX co 3 s —
         # po zmianie pliku (np. re-eksport przez agenta) podgląd sam się
@@ -6182,6 +6457,8 @@ async def _serve_file(request, target):
                   else '<a class="nav-off">← poprzednie</a>')
         a_next = (f'<a href="{nxt}" id="next">następne →</a>' if nxt
                   else '<a class="nav-off">następne →</a>')
+        obrot = (target.suffix.lower() not in ('.svg', '.svgz') and not KONF.tylko_odczyt
+                 and KONF.modul('przenoszenie'))
         crop_btn = ('' if (target.suffix.lower() == '.svg' or KONF.tylko_odczyt
                            or not KONF.modul('kadrowanie'))
                     else '<a href="#" id="cropb" title="Przytnij obszar (np. do kartki)">'
@@ -6197,6 +6474,13 @@ async def _serve_file(request, target):
             f'<a href="#" id="fitb" title="Dopasuj do okna (dwuklik / klawisz 0)">⊡ dopasuj</a>'
             f'<a href="#" id="natb" title="Rozmiar naturalny (klawisz 1)">1:1</a>'
             f'{crop_btn}'
+            + (_przen.PRZYCISKI_OBRAZU if obrot else '')
+            # druk obrazu oknem druku przeglądarki (jak w sprawozdania-server.py):
+            # arkusz @media print pokazuje sam obraz, bez paska
+            + ('<a href="#" id="prnb" onclick="window.print();return false" '
+               'title="Drukuj obraz (okno druku przeglądarki)">🖨 drukuj</a>'
+               '<style>@media print{.bar{display:none!important}}</style>'
+               if target.suffix.lower() not in ('.svg', '.svgz') else '') +
             f'<a href="{quote(target.name)}?dl=1">⬇ pobierz</a></div>'
             f'<div class="stage"><img src="{quote(target.name)}?v={target.stat().st_mtime:.0f}" alt="{_esc(target.name)}"></div>'
             '<div class="cropov" id="cropov"></div>'
@@ -6238,7 +6522,8 @@ async def _serve_file(request, target):
             'if(nm!==_mt){_mt=nm;im.src=_Q+"?v="+nm;}'
             '}catch(e){}}'
             'setInterval(chk,3000);})();'
-            '</script>' + VIEWER_JS + CROP_JS)
+            '</script>' + VIEWER_JS + CROP_JS
+            + ('<script>' + JS_ZAPIS + '</script>' + _przen.JS_OBRAZU if obrot else ''))
         return web.Response(text=html, content_type='text/html')
 
     # Generyczny plik. Dla TEKSTU wymuś charset=utf-8 — inaczej przeglądarka
@@ -6352,6 +6637,7 @@ def utworz_aplikacje(k):
         # import tylko tu: konsola (basic) nie potrzebuje pliku logowanie.py
         import logowanie as _LOGOWANIE
         _LOGOWANIE.LINK_STARTOWY = _link_startowy()  # przycisk 🏠 także na ekranie logowania
+        _LOGOWANIE.LINK_PARTNERA = _link_partnera     # ⇄ partner (wołany przy każdej stronie)
         _LOGOWANIE.zapewnij_sekret(k.katalog_auth)   # 32 bajty, 0600, przy 1. starcie
         _BRAMKA = _LOGOWANIE.Bramka(rejestr=_evlog, bez_tokenu=k.ustaw_haslo_bez_tokenu,
                                     oglos=_oglos_token_startowy)
@@ -6379,7 +6665,8 @@ def utworz_aplikacje(k):
                    level='error')
     # client_max_size: ciało żądania wczytywane do pamięci (request.read/post/json)
     # — małe; wgrywanie czyta strumieniowo z własnym licznikiem (upload)
-    app = web.Application(middlewares=[errlog, straz_zrodla, auth, straz_ukrytych],
+    app = web.Application(middlewares=[kontekst_zadania, errlog, straz_zrodla, auth,
+                                       straz_ukrytych],
                           client_max_size=LIMIT_CIALA_ZADANIA)
     app.on_response_prepare.append(_naglowki_bezpieczenstwa)   # CSP itd. (A3, C5)
     global _PAMIEC
@@ -6394,6 +6681,8 @@ def utworz_aplikacje(k):
     app.on_cleanup.append(_wygasanie_stop)
     app.on_cleanup.append(_pamiec_stop)
     app.on_cleanup.append(_dziennik_stop)
+    app.router.add_get('/_z_partnera', z_partnera)
+    app.router.add_get(_pdfjs.PREFIKS + '{nazwa}', pdfjs_plik)
     app.router.add_get('/{path:.*}', serve)
     app.router.add_post('/{path:.*}', upload)
     app.router.add_delete('/{path:.*}', delete_item)

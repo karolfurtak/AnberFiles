@@ -65,6 +65,24 @@ def _zadanie(otw, url: str, limit_s: float, dane: bytes = None, naglowki=None):
         raise Blad(4, f'BŁĄD sieci: {url.split("?")[0]} — {powod} (limit {limit_s:g} s)')
 
 
+def _terminal() -> bool:
+    """Czy stdin to prawdziwy terminal. Windows: urządzenie NUL (stdin=DEVNULL)
+    też zgłasza isatty() = True, a getpass czekałby wtedy na klawiaturę bez końca —
+    rozstrzyga GetConsoleMode (działa tylko na konsoli)."""
+    if not sys.stdin.isatty():
+        return False
+    if os.name != 'nt':
+        return True
+    try:
+        import ctypes
+        import msvcrt
+        tryb = ctypes.c_ulong()
+        uchwyt = msvcrt.get_osfhandle(sys.stdin.fileno())
+        return bool(ctypes.windll.kernel32.GetConsoleMode(uchwyt, ctypes.byref(tryb)))
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 def zaloguj(otw, adres: str, haslo: str, limit_s: float):
     dane = urllib.parse.urlencode({'haslo': haslo, 'dalej': '/'}).encode()
     kod, _ = _zadanie(otw, adres + SCIEZKA_LOGOWANIA, limit_s, dane,
@@ -162,7 +180,7 @@ def main(argv=None) -> int:
         ap.error('--limit-s musi być dodatnie')
     adres = a.adres.rstrip('/')
     haslo = os.environ.get('ANBERFILES_HASLO')
-    if haslo is None and sys.stdin.isatty():
+    if haslo is None and _terminal():
         haslo = getpass.getpass('Hasło AnberFiles: ')
     if not haslo:
         print('BŁĄD: brak hasła (zmienna ANBERFILES_HASLO albo terminal).', file=sys.stderr)
