@@ -28,3 +28,10 @@ odłożone (pomiar), warunek powrotu.
   skryptu instancji (`_lektor_opcje`).
 - Powrót: osobne zadanie (to_do „jeden silnik lektora”) z testami obu trybów;
   zepsucie lektora kosztowałoby obie instancje.
+
+## 4. Podatne zależności na Pythonie 3.10 (konsola Anbernic)
+- pip-audit 19.11.2026: pillow 12.3.0 i soupsieve 2.10 mają znane podatności, a ich
+  poprawki (pillow 13, soupsieve ≥ 3.0.2) wymagają Pythona ≥ 3.11 (soupsieve ≥ 3.11.5).
+  requirements.txt rozdziela wersje znacznikami `python_full_version`; Jarvis/Wykonawca
+  (3.13) mają wersje poprawione, konsola 3.10 nie.
+- Powrót: Python ≥ 3.11.5 na konsoli Anbernic albo usunięcie zależności z jej instalacji.

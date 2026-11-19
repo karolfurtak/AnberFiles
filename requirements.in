@@ -1,9 +1,12 @@
 # Zależności serwera (app/) i lektora (tools/czytaj_tts.py) — WEJŚCIE.
 # Instaluje się requirements.txt (wersje == i skróty sha256, także zależności
 # przechodnie, wheele dla wszystkich platform). Po zmianie tego pliku:
-#   uv pip compile requirements.in --universal --fork-strategy fewest \
+#   uv pip compile requirements.in --universal \
 #       --python-version 3.10 --generate-hashes --annotation-style line -o requirements.txt
-# (--python-version 3.10: wersje działające na konsoli Anbernic i na Jarvisie 3.13)
+# (--python-version 3.10: wersje działające na konsoli Anbernic i na Jarvisie 3.13;
+#  19.11.2026 bez --fork-strategy fewest: poprawki bezpieczeństwa pillow 13
+#  i soupsieve 4 wymagają Pythona >= 3.11 — uv rozdziela wersje znacznikami
+#  python_full_version; Anbernic (3.10) zostaje na ostatnich wersjach dla 3.10)
 aiohttp
 markdown
 nh3                 # sanityzacja HTML podglądu .md (bez niej: HTML pokazany jako tekst)
